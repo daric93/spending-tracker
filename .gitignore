@@ -1,0 +1,28 @@
+# Rust build artifacts
+/target
+*.pdb
+
+# Environment variables
+.env
+.env.local
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Kiro specs (local development only)
+.kiro/
