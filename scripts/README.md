@@ -55,3 +55,25 @@ Or connect to it directly:
 ```bash
 psql spending_tracker
 ```
+
+## SQLx Offline Mode
+
+This project uses SQLx's offline mode for CI/CD to avoid requiring a database connection during compilation.
+
+### Regenerating Query Metadata
+
+If you modify any SQL queries in the code, you need to regenerate the query metadata:
+
+```bash
+cargo sqlx prepare --database-url "postgresql://localhost/spending_tracker" -- --all-targets --all-features
+```
+
+This will update the `.sqlx/` directory, which should be committed to version control.
+
+### Using Offline Mode Locally
+
+To compile without a database connection:
+
+```bash
+SQLX_OFFLINE=true cargo build
+```

@@ -112,6 +112,8 @@ jobs:
             ${{ runner.os }}-cargo-build-target-
       
       - name: Run Clippy
+        env:
+          SQLX_OFFLINE: true
         run: cargo clippy --all-targets --all-features -- -D warnings
   
   format:
@@ -128,6 +130,8 @@ jobs:
           components: rustfmt
       
       - name: Check formatting
+        env:
+          SQLX_OFFLINE: true
         run: cargo fmt --check
   
   build-docker:
