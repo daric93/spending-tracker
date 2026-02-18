@@ -3,6 +3,9 @@ name = "spending_tracker"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
 # Web framework
 axum = "0.8.8"
@@ -11,11 +14,11 @@ tower = "0.5.3"
 tower-http = { version = "0.6.8", features = ["cors", "trace"] }
 
 # Database
-sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio-rustls", "uuid", "chrono"] }
+sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio-rustls", "uuid", "chrono", "rust_decimal"] }
 
 # Authentication
 bcrypt = "0.18"
-jsonwebtoken = "10"
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -27,6 +30,16 @@ chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1", features = ["serde"] }
 thiserror = "2"
 anyhow = "1"
+async-trait = "0.1"
+dotenv = "0.15"
 
 # Validation
 validator = { version = "0.20", features = ["derive"] }
+iso_currency = "0.4"
+
+# OpenAPI Documentation
+utoipa = { version = "5.4.0", features = ["axum_extras", "chrono", "uuid", "decimal"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+
+[dev-dependencies]
+tower = { version = "0.5.3", features = ["util"] }
