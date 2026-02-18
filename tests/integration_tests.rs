@@ -1,10 +1,10 @@
 use axum::{
+    Router,
     body::Body,
     http::{Request, StatusCode},
     routing::{get, post},
-    Router,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,7 +32,7 @@ impl TestContext {
     /// Create a new test context with database connection
     async fn new() -> Self {
         dotenv::dotenv().ok();
-        
+
         let database_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgresql://localhost/spending_tracker".to_string());
 
@@ -78,13 +78,20 @@ async fn parse_json_body(body: Body) -> Value {
 async fn test_health_check() {
     let ctx = TestContext::new().await;
     let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
-    let auth_service: Arc<dyn AuthService> =
-        Arc::new(AuthServiceImpl::new(user_repository, "test_secret".to_string()));
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository,
+        "test_secret".to_string(),
+    ));
 
     let app = create_test_app(auth_service);
 
     let response = app
-        .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -95,8 +102,10 @@ async fn test_health_check() {
 async fn test_register_success() {
     let ctx = TestContext::new().await;
     let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
-    let auth_service: Arc<dyn AuthService> =
-        Arc::new(AuthServiceImpl::new(user_repository.clone(), "test_secret".to_string()));
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository.clone(),
+        "test_secret".to_string(),
+    ));
 
     let app = create_test_app(auth_service);
 
@@ -131,10 +140,7 @@ async fn test_register_success() {
     assert!(body.get("password_hash").is_none()); // Should not be serialized
 
     // Verify user exists in database
-    let user = user_repository
-        .find_by_email(&email)
-        .await
-        .unwrap();
+    let user = user_repository.find_by_email(&email).await.unwrap();
     assert!(user.is_some());
     let user = user.unwrap();
     assert_eq!(user.name, "Test User");
@@ -145,8 +151,10 @@ async fn test_register_success() {
 async fn test_register_validation_error_invalid_email() {
     let ctx = TestContext::new().await;
     let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
-    let auth_service: Arc<dyn AuthService> =
-        Arc::new(AuthServiceImpl::new(user_repository, "test_secret".to_string()));
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository,
+        "test_secret".to_string(),
+    ));
 
     let app = create_test_app(auth_service);
 
@@ -180,8 +188,10 @@ async fn test_register_validation_error_invalid_email() {
 async fn test_register_validation_error_short_password() {
     let ctx = TestContext::new().await;
     let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
-    let auth_service: Arc<dyn AuthService> =
-        Arc::new(AuthServiceImpl::new(user_repository, "test_secret".to_string()));
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository,
+        "test_secret".to_string(),
+    ));
 
     let app = create_test_app(auth_service);
 
@@ -216,8 +226,10 @@ async fn test_register_validation_error_short_password() {
 async fn test_register_duplicate_email() {
     let ctx = TestContext::new().await;
     let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
-    let auth_service: Arc<dyn AuthService> =
-        Arc::new(AuthServiceImpl::new(user_repository, "test_secret".to_string()));
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository,
+        "test_secret".to_string(),
+    ));
 
     let app = create_test_app(auth_service);
 
@@ -269,8 +281,10 @@ async fn test_register_duplicate_email() {
 async fn test_login_success() {
     let ctx = TestContext::new().await;
     let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
-    let auth_service: Arc<dyn AuthService> =
-        Arc::new(AuthServiceImpl::new(user_repository, "test_secret".to_string()));
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository,
+        "test_secret".to_string(),
+    ));
 
     let app = create_test_app(auth_service);
 
@@ -328,8 +342,10 @@ async fn test_login_success() {
 async fn test_login_invalid_credentials_wrong_password() {
     let ctx = TestContext::new().await;
     let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
-    let auth_service: Arc<dyn AuthService> =
-        Arc::new(AuthServiceImpl::new(user_repository, "test_secret".to_string()));
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository,
+        "test_secret".to_string(),
+    ));
 
     let app = create_test_app(auth_service);
 
@@ -386,8 +402,10 @@ async fn test_login_invalid_credentials_wrong_password() {
 async fn test_login_invalid_credentials_nonexistent_user() {
     let ctx = TestContext::new().await;
     let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
-    let auth_service: Arc<dyn AuthService> =
-        Arc::new(AuthServiceImpl::new(user_repository, "test_secret".to_string()));
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository,
+        "test_secret".to_string(),
+    ));
 
     let app = create_test_app(auth_service);
 
@@ -421,8 +439,10 @@ async fn test_login_invalid_credentials_nonexistent_user() {
 async fn test_register_and_login_flow() {
     let ctx = TestContext::new().await;
     let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
-    let auth_service: Arc<dyn AuthService> =
-        Arc::new(AuthServiceImpl::new(user_repository.clone(), "test_secret".to_string()));
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository.clone(),
+        "test_secret".to_string(),
+    ));
 
     let app = create_test_app(auth_service);
 
@@ -489,5 +509,5 @@ async fn test_register_and_login_flow() {
     // Step 4: Verify token is valid
     let token = login_response["token"].as_str().unwrap();
     assert!(!token.is_empty());
-    assert!(token.contains('.'));  // JWT tokens have dots
+    assert!(token.contains('.')); // JWT tokens have dots
 }

@@ -9,10 +9,10 @@ use crate::models::user::{CreateUserRequest, User};
 pub enum RepositoryError {
     #[error("Resource not found")]
     NotFound,
-    
+
     #[error("Database error: {0}")]
     DatabaseError(String),
-    
+
     #[error("Constraint violation: {0}")]
     ConstraintViolation(String),
 }
@@ -21,11 +21,15 @@ pub enum RepositoryError {
 #[async_trait]
 pub trait UserRepository: Send + Sync {
     /// Create a new user
-    async fn create(&self, user: CreateUserRequest, password_hash: String) -> Result<User, RepositoryError>;
-    
+    async fn create(
+        &self,
+        user: CreateUserRequest,
+        password_hash: String,
+    ) -> Result<User, RepositoryError>;
+
     /// Find a user by email
     async fn find_by_email(&self, email: &str) -> Result<Option<User>, RepositoryError>;
-    
+
     /// Find a user by ID
     async fn find_by_id(&self, id: Uuid) -> Result<Option<User>, RepositoryError>;
 }
@@ -43,9 +47,13 @@ impl PostgresUserRepository {
 
 #[async_trait]
 impl UserRepository for PostgresUserRepository {
-    async fn create(&self, user: CreateUserRequest, password_hash: String) -> Result<User, RepositoryError> {
+    async fn create(
+        &self,
+        user: CreateUserRequest,
+        password_hash: String,
+    ) -> Result<User, RepositoryError> {
         let default_currency = user.default_currency.unwrap_or_else(|| "USD".to_string());
-        
+
         let result = sqlx::query_as!(
             User,
             r#"
@@ -60,14 +68,14 @@ impl UserRepository for PostgresUserRepository {
         )
         .fetch_one(&self.pool)
         .await;
-        
+
         match result {
             Ok(user) => Ok(user),
             Err(sqlx::Error::Database(db_err)) => {
                 // Check for unique constraint violation (duplicate email)
                 if db_err.is_unique_violation() {
                     Err(RepositoryError::ConstraintViolation(
-                        "Email already exists".to_string()
+                        "Email already exists".to_string(),
                     ))
                 } else {
                     Err(RepositoryError::DatabaseError(db_err.to_string()))
@@ -76,7 +84,7 @@ impl UserRepository for PostgresUserRepository {
             Err(e) => Err(RepositoryError::DatabaseError(e.to_string())),
         }
     }
-    
+
     async fn find_by_email(&self, email: &str) -> Result<Option<User>, RepositoryError> {
         let result: Result<Option<User>, sqlx::Error> = sqlx::query_as!(
             User,
@@ -89,13 +97,13 @@ impl UserRepository for PostgresUserRepository {
         )
         .fetch_optional(&self.pool)
         .await;
-        
+
         match result {
             Ok(user) => Ok(user),
             Err(e) => Err(RepositoryError::DatabaseError(e.to_string())),
         }
     }
-    
+
     async fn find_by_id(&self, id: Uuid) -> Result<Option<User>, RepositoryError> {
         let result: Result<Option<User>, sqlx::Error> = sqlx::query_as!(
             User,
@@ -108,7 +116,7 @@ impl UserRepository for PostgresUserRepository {
         )
         .fetch_optional(&self.pool)
         .await;
-        
+
         match result {
             Ok(user) => Ok(user),
             Err(e) => Err(RepositoryError::DatabaseError(e.to_string())),

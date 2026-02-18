@@ -1,6 +1,6 @@
 use axum::{
-    routing::{get, post},
     Router,
+    routing::{get, post},
 };
 use sqlx::postgres::PgPoolOptions;
 use std::env;
@@ -9,7 +9,7 @@ use tower_http::cors::CorsLayer;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use spending_tracker::handlers::auth_handlers::{login_handler, register_handler, ErrorResponse};
+use spending_tracker::handlers::auth_handlers::{ErrorResponse, login_handler, register_handler};
 use spending_tracker::models::auth::{AuthToken, LoginRequest};
 use spending_tracker::models::user::{CreateUserRequest, User};
 use spending_tracker::repositories::user_repository::PostgresUserRepository;
@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start server
     let addr = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    
+
     println!("✓ Server running on http://{}", addr);
     println!("  - Health check: http://{}/health", addr);
     println!("  - Register: POST http://{}/api/auth/register", addr);

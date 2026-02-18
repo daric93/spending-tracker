@@ -27,15 +27,19 @@ pub struct User {
     "default_currency": "USD"
 }))]
 pub struct CreateUserRequest {
-    #[validate(length(min = 3, max = 100, message = "Name must be between 3 and 100 characters"))]
+    #[validate(length(
+        min = 3,
+        max = 100,
+        message = "Name must be between 3 and 100 characters"
+    ))]
     pub name: String,
-    
+
     #[validate(email(message = "Invalid email format"))]
     pub email: String,
-    
+
     #[validate(length(min = 8, message = "Password must be at least 8 characters"))]
     pub password: String,
-    
+
     #[validate(custom(function = "validate_currency_code"))]
     pub default_currency: Option<String>,
 }
