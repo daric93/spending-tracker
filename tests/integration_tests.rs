@@ -20,7 +20,11 @@ static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Generate a unique email for each test to avoid conflicts
 fn unique_email(prefix: &str) -> String {
     let count = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-    format!("{}{}@test.example.com", prefix, count)
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{}{}_{}@test.example.com", prefix, count, timestamp)
 }
 
 /// Test fixture that manages database lifecycle

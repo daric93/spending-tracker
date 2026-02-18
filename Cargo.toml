@@ -43,3 +43,4 @@ utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 
 [dev-dependencies]
 tower = { version = "0.5.3", features = ["util"] }
+proptest = "1.4"

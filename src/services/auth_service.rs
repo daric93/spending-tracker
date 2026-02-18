@@ -347,4 +347,193 @@ mod tests {
         let result = service.validate_token("invalid_token").await;
         assert!(matches!(result, Err(AuthError::InvalidToken)));
     }
+
+    // Feature: spending-tracker-api, Property 3: Authentication Token Generation
+    // For any registered user with valid credentials, authentication should return a valid JWT token
+    // that can be used for subsequent requests.
+
+    #[tokio::test]
+    async fn test_token_generation_returns_valid_jwt() {
+        let repo = Arc::new(MockUserRepository::new());
+        let service = AuthServiceImpl::new(repo.clone(), "test_secret".to_string());
+
+        // Register a user
+        let register_request = CreateUserRequest {
+            name: "Test User".to_string(),
+            email: "test@example.com".to_string(),
+            password: "password123".to_string(),
+            default_currency: Some("USD".to_string()),
+        };
+        let user = service.register(register_request).await.unwrap();
+
+        // Login to get token
+        let login_request = LoginRequest {
+            email: "test@example.com".to_string(),
+            password: "password123".to_string(),
+        };
+        let auth_token = service.login(login_request).await.unwrap();
+
+        // Verify token format (JWT has 3 parts: header.payload.signature)
+        let parts: Vec<&str> = auth_token.token.split('.').collect();
+        assert_eq!(parts.len(), 3, "JWT should have 3 parts");
+        assert!(!parts[0].is_empty(), "Header should not be empty");
+        assert!(!parts[1].is_empty(), "Payload should not be empty");
+        assert!(!parts[2].is_empty(), "Signature should not be empty");
+
+        // Verify token can be validated
+        let validated_user_id = service.validate_token(&auth_token.token).await.unwrap();
+        assert_eq!(validated_user_id, user.id, "Token should contain correct user_id");
+    }
+
+    #[tokio::test]
+    async fn test_token_contains_correct_user_id() {
+        let repo = Arc::new(MockUserRepository::new());
+        let service = AuthServiceImpl::new(repo.clone(), "test_secret".to_string());
+
+        // Register multiple users
+        let user1 = service
+            .register(CreateUserRequest {
+                name: "User 1".to_string(),
+                email: "user1@example.com".to_string(),
+                password: "password123".to_string(),
+                default_currency: Some("USD".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let user2 = service
+            .register(CreateUserRequest {
+                name: "User 2".to_string(),
+                email: "user2@example.com".to_string(),
+                password: "password123".to_string(),
+                default_currency: Some("USD".to_string()),
+            })
+            .await
+            .unwrap();
+
+        // Login as user1
+        let token1 = service
+            .login(LoginRequest {
+                email: "user1@example.com".to_string(),
+                password: "password123".to_string(),
+            })
+            .await
+            .unwrap();
+
+        // Login as user2
+        let token2 = service
+            .login(LoginRequest {
+                email: "user2@example.com".to_string(),
+                password: "password123".to_string(),
+            })
+            .await
+            .unwrap();
+
+        // Validate tokens return correct user IDs
+        let validated_id1 = service.validate_token(&token1.token).await.unwrap();
+        let validated_id2 = service.validate_token(&token2.token).await.unwrap();
+
+        assert_eq!(validated_id1, user1.id);
+        assert_eq!(validated_id2, user2.id);
+        assert_ne!(validated_id1, validated_id2, "Different users should have different IDs");
+    }
+
+    #[tokio::test]
+    async fn test_token_expiration_is_set() {
+        let repo = Arc::new(MockUserRepository::new());
+        let service = AuthServiceImpl::new(repo.clone(), "test_secret".to_string());
+
+        // Register and login
+        service
+            .register(CreateUserRequest {
+                name: "Test User".to_string(),
+                email: "test@example.com".to_string(),
+                password: "password123".to_string(),
+                default_currency: Some("USD".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let auth_token = service
+            .login(LoginRequest {
+                email: "test@example.com".to_string(),
+                password: "password123".to_string(),
+            })
+            .await
+            .unwrap();
+
+        // Verify expiration is in the future (24 hours from now)
+        let now = Utc::now();
+        assert!(
+            auth_token.expires_at > now,
+            "Token expiration should be in the future"
+        );
+
+        // Verify expiration is approximately 24 hours from now (with 1 minute tolerance)
+        let expected_expiration = now + Duration::hours(24);
+        let diff = (auth_token.expires_at - expected_expiration).num_seconds().abs();
+        assert!(
+            diff < 60,
+            "Token should expire in approximately 24 hours (diff: {} seconds)",
+            diff
+        );
+    }
+
+    #[tokio::test]
+    async fn test_token_with_different_secrets_are_invalid() {
+        let repo = Arc::new(MockUserRepository::new());
+        let service1 = AuthServiceImpl::new(repo.clone(), "secret1".to_string());
+        let service2 = AuthServiceImpl::new(repo.clone(), "secret2".to_string());
+
+        // Register and login with service1
+        service1
+            .register(CreateUserRequest {
+                name: "Test User".to_string(),
+                email: "test@example.com".to_string(),
+                password: "password123".to_string(),
+                default_currency: Some("USD".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let auth_token = service1
+            .login(LoginRequest {
+                email: "test@example.com".to_string(),
+                password: "password123".to_string(),
+            })
+            .await
+            .unwrap();
+
+        // Try to validate token with service2 (different secret)
+        let result = service2.validate_token(&auth_token.token).await;
+        assert!(
+            matches!(result, Err(AuthError::InvalidToken)),
+            "Token signed with different secret should be invalid"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_malformed_token_is_rejected() {
+        let repo = Arc::new(MockUserRepository::new());
+        let service = AuthServiceImpl::new(repo, "test_secret".to_string());
+
+        // Test various malformed tokens
+        let malformed_tokens = vec![
+            "not.a.token",
+            "invalid",
+            "",
+            "header.payload", // Missing signature
+            "a.b.c.d",        // Too many parts
+        ];
+
+        for token in malformed_tokens {
+            let result = service.validate_token(token).await;
+            assert!(
+                matches!(result, Err(AuthError::InvalidToken)),
+                "Malformed token '{}' should be rejected",
+                token
+            );
+        }
+    }
 }
+
