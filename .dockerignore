@@ -1,0 +1,37 @@
+# Git
+.git
+.gitignore
+
+# CI/CD
+.github
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Build artifacts
+target/
+**/*.rs.bk
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Documentation
+README.md
+docs/
+
+# Tests
+tests/
+
+# Kiro specs
+.kiro/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
