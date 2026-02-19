@@ -11,8 +11,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tower::ServiceExt;
 
 use spending_tracker::handlers::auth_handlers::{login_handler, register_handler};
+use spending_tracker::handlers::spending_handlers::create_entry_handler;
+use spending_tracker::repositories::category_repository::PostgresCategoryRepository;
+use spending_tracker::repositories::spending_repository::PostgresSpendingRepository;
 use spending_tracker::repositories::user_repository::{PostgresUserRepository, UserRepository};
 use spending_tracker::services::auth_service::{AuthService, AuthServiceImpl};
+use spending_tracker::services::category_service::{CategoryService, CategoryServiceImpl};
+use spending_tracker::services::spending_service::{SpendingService, SpendingServiceImpl};
 
 /// Global counter for generating unique test emails
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -514,4 +519,316 @@ async fn test_register_and_login_flow() {
     let token = login_response["token"].as_str().unwrap();
     assert!(!token.is_empty());
     assert!(token.contains('.')); // JWT tokens have dots
+}
+
+#[tokio::test]
+async fn test_create_spending_entry_success() {
+    let ctx = TestContext::new().await;
+    
+    // Initialize repositories
+    let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
+    let category_repository = Arc::new(PostgresCategoryRepository::new(ctx.pool().clone()));
+    let spending_repository = Arc::new(PostgresSpendingRepository::new(ctx.pool().clone()));
+    
+    // Initialize services
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository.clone(),
+        "test_secret".to_string(),
+    ));
+    let category_service: Arc<dyn CategoryService> = Arc::new(CategoryServiceImpl::new(
+        category_repository,
+    ));
+    let spending_service: Arc<dyn SpendingService> = Arc::new(SpendingServiceImpl::new(
+        spending_repository,
+        category_service,
+    ));
+
+    // Create app with only spending service state
+    let app = Router::new()
+        .route("/api/spending", post(create_entry_handler))
+        .with_state(spending_service);
+
+    let email = unique_email("spending_test");
+    
+    // Step 1: Register a user directly using the auth service (not via HTTP)
+    let register_request = spending_tracker::models::user::CreateUserRequest {
+        name: "Spending Test User".to_string(),
+        email: email.clone(),
+        password: "password123".to_string(),
+        default_currency: Some("USD".to_string()),
+    };
+    
+    let user = auth_service.register(register_request).await.unwrap();
+
+    // Step 2: Create a spending entry with valid data
+    let spending_body = json!({
+        "amount": 42.50,
+        "date": "2024-01-15",
+        "categories": ["groceries"],  // Just the string, not {"Name": "groceries"}
+        "is_recurring": false,
+        "currency_code": "USD"
+    });
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/spending")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&spending_body).unwrap()))
+        .unwrap();
+
+    // Manually insert the AuthenticatedUser extension to bypass middleware
+    request.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user.id,
+        }
+    );
+
+    let response = app
+        .oneshot(request)
+        .await
+        .unwrap();
+
+    // Verify response
+    assert_eq!(response.status(), StatusCode::CREATED);
+    
+    let body = parse_json_body(response.into_body()).await;
+    assert!(body["id"].is_string());
+    assert_eq!(body["amount"], "42.50");
+    assert_eq!(body["date"], "2024-01-15");
+    assert_eq!(body["currency_code"], "USD");
+    assert_eq!(body["is_recurring"], false);
+    assert!(body["category_ids"].is_array());
+    assert_eq!(body["category_ids"].as_array().unwrap().len(), 1);
+    assert!(body["created_at"].is_string());
+    assert!(body["updated_at"].is_string());
+}
+
+#[tokio::test]
+async fn test_create_spending_entry_negative_amount() {
+    let ctx = TestContext::new().await;
+    
+    // Initialize repositories
+    let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
+    let category_repository = Arc::new(PostgresCategoryRepository::new(ctx.pool().clone()));
+    let spending_repository = Arc::new(PostgresSpendingRepository::new(ctx.pool().clone()));
+    
+    // Initialize services
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository.clone(),
+        "test_secret".to_string(),
+    ));
+    let category_service: Arc<dyn CategoryService> = Arc::new(CategoryServiceImpl::new(
+        category_repository,
+    ));
+    let spending_service: Arc<dyn SpendingService> = Arc::new(SpendingServiceImpl::new(
+        spending_repository,
+        category_service,
+    ));
+
+    // Create app with only spending service state
+    let app = Router::new()
+        .route("/api/spending", post(create_entry_handler))
+        .with_state(spending_service);
+
+    let email = unique_email("negative_amount_test");
+    
+    // Step 1: Register a user directly using the auth service (not via HTTP)
+    let register_request = spending_tracker::models::user::CreateUserRequest {
+        name: "Negative Amount Test User".to_string(),
+        email: email.clone(),
+        password: "password123".to_string(),
+        default_currency: Some("USD".to_string()),
+    };
+    
+    let user = auth_service.register(register_request).await.unwrap();
+
+    // Step 2: Attempt to create a spending entry with negative amount
+    let spending_body = json!({
+        "amount": -50.00,
+        "date": "2024-01-15",
+        "categories": ["groceries"],
+        "is_recurring": false,
+        "currency_code": "USD"
+    });
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/spending")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&spending_body).unwrap()))
+        .unwrap();
+
+    // Manually insert the AuthenticatedUser extension to bypass middleware
+    request.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user.id,
+        }
+    );
+
+    let response = app
+        .oneshot(request)
+        .await
+        .unwrap();
+
+    // Verify response - should return 400 Bad Request
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    
+    let body = parse_json_body(response.into_body()).await;
+    assert!(body["error"].is_string());
+    assert!(body["message"].is_string());
+    // The error message should indicate the amount validation issue
+    let message = body["message"].as_str().unwrap().to_lowercase();
+    assert!(message.contains("amount") || message.contains("positive") || message.contains("greater"));
+}
+
+#[tokio::test]
+async fn test_create_spending_entry_with_new_custom_category() {
+    let ctx = TestContext::new().await;
+    
+    // Initialize repositories
+    let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
+    let category_repository = Arc::new(PostgresCategoryRepository::new(ctx.pool().clone()));
+    let spending_repository = Arc::new(PostgresSpendingRepository::new(ctx.pool().clone()));
+    
+    // Initialize services
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository.clone(),
+        "test_secret".to_string(),
+    ));
+    let category_service: Arc<dyn CategoryService> = Arc::new(CategoryServiceImpl::new(
+        category_repository.clone(),
+    ));
+    let spending_service: Arc<dyn SpendingService> = Arc::new(SpendingServiceImpl::new(
+        spending_repository,
+        category_service.clone(),
+    ));
+
+    // Create app with only spending service state
+    let app = Router::new()
+        .route("/api/spending", post(create_entry_handler))
+        .with_state(spending_service);
+
+    let email = unique_email("custom_category_test");
+    
+    // Step 1: Register a user directly using the auth service (not via HTTP)
+    let register_request = spending_tracker::models::user::CreateUserRequest {
+        name: "Custom Category Test User".to_string(),
+        email: email.clone(),
+        password: "password123".to_string(),
+        default_currency: Some("USD".to_string()),
+    };
+    
+    let user = auth_service.register(register_request).await.unwrap();
+
+    // Step 2: Create a spending entry with a new custom category name
+    let custom_category_name = format!("my_custom_category_{}", TEST_COUNTER.fetch_add(1, Ordering::SeqCst));
+    let spending_body = json!({
+        "amount": 75.25,
+        "date": "2024-01-20",
+        "categories": [custom_category_name.clone()],
+        "is_recurring": false,
+        "currency_code": "USD"
+    });
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/spending")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&spending_body).unwrap()))
+        .unwrap();
+
+    // Manually insert the AuthenticatedUser extension to bypass middleware
+    request.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user.id,
+        }
+    );
+
+    let response = app
+        .oneshot(request)
+        .await
+        .unwrap();
+
+    // Verify response - should return 201 Created
+    assert_eq!(response.status(), StatusCode::CREATED);
+    
+    let body = parse_json_body(response.into_body()).await;
+    assert!(body["id"].is_string());
+    assert_eq!(body["amount"], "75.25");
+    assert_eq!(body["date"], "2024-01-20");
+    assert_eq!(body["currency_code"], "USD");
+    assert_eq!(body["is_recurring"], false);
+    assert!(body["category_ids"].is_array());
+    assert_eq!(body["category_ids"].as_array().unwrap().len(), 1);
+    
+    // Step 3: Verify the custom category was auto-created
+    let categories = category_service.get_categories(user.id).await.unwrap();
+    let custom_category = categories.iter().find(|c| c.name == custom_category_name);
+    assert!(custom_category.is_some(), "Custom category should have been auto-created");
+    
+    let custom_category = custom_category.unwrap();
+    assert_eq!(custom_category.name, custom_category_name);
+    assert_eq!(custom_category.user_id, Some(user.id));
+    
+    // Verify the category ID in the spending entry matches the auto-created category
+    let category_id_from_entry = body["category_ids"][0].as_str().unwrap();
+    assert_eq!(category_id_from_entry, custom_category.id.to_string());
+}
+
+#[tokio::test]
+async fn test_create_spending_entry_without_auth_token() {
+    let ctx = TestContext::new().await;
+    
+    // Initialize repositories
+    let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
+    let category_repository = Arc::new(PostgresCategoryRepository::new(ctx.pool().clone()));
+    let spending_repository = Arc::new(PostgresSpendingRepository::new(ctx.pool().clone()));
+    
+    // Initialize services
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository.clone(),
+        "test_secret".to_string(),
+    ));
+    let category_service: Arc<dyn CategoryService> = Arc::new(CategoryServiceImpl::new(
+        category_repository,
+    ));
+    let spending_service: Arc<dyn SpendingService> = Arc::new(SpendingServiceImpl::new(
+        spending_repository,
+        category_service,
+    ));
+
+    // Create app with auth middleware applied to the spending route
+    let app = Router::new()
+        .route("/api/spending", post(create_entry_handler))
+        .layer(axum::middleware::from_fn_with_state(
+            auth_service.clone(),
+            spending_tracker::middleware::auth_middleware::auth_middleware,
+        ))
+        .with_state(spending_service);
+
+    // Attempt to create a spending entry without providing an auth token
+    let spending_body = json!({
+        "amount": 100.00,
+        "date": "2024-01-15",
+        "categories": ["groceries"],
+        "is_recurring": false,
+        "currency_code": "USD"
+    });
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/spending")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&spending_body).unwrap()))
+        .unwrap();
+
+    let response = app
+        .oneshot(request)
+        .await
+        .unwrap();
+
+    // Verify response - should return 401 Unauthorized
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    
+    let body = parse_json_body(response.into_body()).await;
+    assert!(body["error"].is_string());
+    let error_message = body["error"].as_str().unwrap();
+    assert!(error_message.contains("Missing authorization token") || error_message.contains("authorization"));
 }
