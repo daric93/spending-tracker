@@ -832,3 +832,469 @@ async fn test_create_spending_entry_without_auth_token() {
     let error_message = body["error"].as_str().unwrap();
     assert!(error_message.contains("Missing authorization token") || error_message.contains("authorization"));
 }
+
+#[tokio::test]
+async fn test_list_entries_user_isolation() {
+    let ctx = TestContext::new().await;
+    
+    // Initialize repositories
+    let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
+    let category_repository = Arc::new(PostgresCategoryRepository::new(ctx.pool().clone()));
+    let spending_repository = Arc::new(PostgresSpendingRepository::new(ctx.pool().clone()));
+    
+    // Initialize services
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository.clone(),
+        "test_secret".to_string(),
+    ));
+    let category_service: Arc<dyn CategoryService> = Arc::new(CategoryServiceImpl::new(
+        category_repository,
+    ));
+    let spending_service: Arc<dyn SpendingService> = Arc::new(SpendingServiceImpl::new(
+        spending_repository,
+        category_service,
+    ));
+
+    // Import the list handler
+    use spending_tracker::handlers::spending_handlers::list_entries_handler;
+
+    // Create app with spending routes
+    let app = Router::new()
+        .route("/api/spending", post(create_entry_handler))
+        .route("/api/spending", axum::routing::get(list_entries_handler))
+        .with_state(spending_service);
+
+    // Step 1: Register two users
+    let email1 = unique_email("user_isolation_1");
+    let email2 = unique_email("user_isolation_2");
+    
+    let register_request1 = spending_tracker::models::user::CreateUserRequest {
+        name: "User One".to_string(),
+        email: email1.clone(),
+        password: "password123".to_string(),
+        default_currency: Some("USD".to_string()),
+    };
+    
+    let register_request2 = spending_tracker::models::user::CreateUserRequest {
+        name: "User Two".to_string(),
+        email: email2.clone(),
+        password: "password123".to_string(),
+        default_currency: Some("USD".to_string()),
+    };
+    
+    let user1 = auth_service.register(register_request1).await.unwrap();
+    let user2 = auth_service.register(register_request2).await.unwrap();
+
+    // Step 2: Create spending entries for user1
+    let spending_body1 = json!({
+        "amount": 50.00,
+        "date": "2024-01-15",
+        "categories": ["groceries"],
+        "is_recurring": false,
+        "currency_code": "USD"
+    });
+    
+    let mut request1 = Request::builder()
+        .method("POST")
+        .uri("/api/spending")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&spending_body1).unwrap()))
+        .unwrap();
+    
+    request1.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user1.id,
+        }
+    );
+
+    let response1 = app.clone()
+        .oneshot(request1)
+        .await
+        .unwrap();
+    
+    assert_eq!(response1.status(), StatusCode::CREATED);
+
+    // Step 3: Create spending entries for user2
+    let spending_body2 = json!({
+        "amount": 100.00,
+        "date": "2024-01-20",
+        "categories": ["restaurant"],
+        "is_recurring": false,
+        "currency_code": "USD"
+    });
+    
+    let mut request2 = Request::builder()
+        .method("POST")
+        .uri("/api/spending")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&spending_body2).unwrap()))
+        .unwrap();
+    
+    request2.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user2.id,
+        }
+    );
+
+    let response2 = app.clone()
+        .oneshot(request2)
+        .await
+        .unwrap();
+    
+    assert_eq!(response2.status(), StatusCode::CREATED);
+
+    // Step 4: List entries for user1 - should only see user1's entries
+    let mut list_request1 = Request::builder()
+        .method("GET")
+        .uri("/api/spending")
+        .body(Body::empty())
+        .unwrap();
+    
+    list_request1.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user1.id,
+        }
+    );
+
+    let list_response1 = app.clone()
+        .oneshot(list_request1)
+        .await
+        .unwrap();
+    
+    assert_eq!(list_response1.status(), StatusCode::OK);
+    
+    let body1 = parse_json_body(list_response1.into_body()).await;
+    assert!(body1.is_array());
+    let entries1 = body1.as_array().unwrap();
+    assert_eq!(entries1.len(), 1, "User 1 should only see their own entry");
+    assert_eq!(entries1[0]["amount"], "50.00");
+    assert_eq!(entries1[0]["user_id"], user1.id.to_string());
+
+    // Step 5: List entries for user2 - should only see user2's entries
+    let mut list_request2 = Request::builder()
+        .method("GET")
+        .uri("/api/spending")
+        .body(Body::empty())
+        .unwrap();
+    
+    list_request2.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user2.id,
+        }
+    );
+
+    let list_response2 = app
+        .oneshot(list_request2)
+        .await
+        .unwrap();
+    
+    assert_eq!(list_response2.status(), StatusCode::OK);
+    
+    let body2 = parse_json_body(list_response2.into_body()).await;
+    assert!(body2.is_array());
+    let entries2 = body2.as_array().unwrap();
+    assert_eq!(entries2.len(), 1, "User 2 should only see their own entry");
+    assert_eq!(entries2[0]["amount"], "100.00");
+    assert_eq!(entries2[0]["user_id"], user2.id.to_string());
+}
+
+#[tokio::test]
+async fn test_list_entries_empty() {
+    let ctx = TestContext::new().await;
+    
+    // Initialize repositories
+    let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
+    let category_repository = Arc::new(PostgresCategoryRepository::new(ctx.pool().clone()));
+    let spending_repository = Arc::new(PostgresSpendingRepository::new(ctx.pool().clone()));
+    
+    // Initialize services
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository.clone(),
+        "test_secret".to_string(),
+    ));
+    let category_service: Arc<dyn CategoryService> = Arc::new(CategoryServiceImpl::new(
+        category_repository,
+    ));
+    let spending_service: Arc<dyn SpendingService> = Arc::new(SpendingServiceImpl::new(
+        spending_repository,
+        category_service,
+    ));
+
+    use spending_tracker::handlers::spending_handlers::list_entries_handler;
+
+    // Create app with spending routes
+    let app = Router::new()
+        .route("/api/spending", axum::routing::get(list_entries_handler))
+        .with_state(spending_service);
+
+    // Register a user
+    let email = unique_email("empty_list");
+    let register_request = spending_tracker::models::user::CreateUserRequest {
+        name: "Empty List User".to_string(),
+        email: email.clone(),
+        password: "password123".to_string(),
+        default_currency: Some("USD".to_string()),
+    };
+    
+    let user = auth_service.register(register_request).await.unwrap();
+
+    // List entries for user with no entries
+    let mut list_request = Request::builder()
+        .method("GET")
+        .uri("/api/spending")
+        .body(Body::empty())
+        .unwrap();
+    
+    list_request.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user.id,
+        }
+    );
+
+    let list_response = app
+        .oneshot(list_request)
+        .await
+        .unwrap();
+    
+    assert_eq!(list_response.status(), StatusCode::OK);
+    
+    let body = parse_json_body(list_response.into_body()).await;
+    assert!(body.is_array());
+    let entries = body.as_array().unwrap();
+    assert_eq!(entries.len(), 0, "User with no entries should get empty array");
+}
+
+#[tokio::test]
+async fn test_list_entries_multiple_entries() {
+    let ctx = TestContext::new().await;
+    
+    // Initialize repositories
+    let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
+    let category_repository = Arc::new(PostgresCategoryRepository::new(ctx.pool().clone()));
+    let spending_repository = Arc::new(PostgresSpendingRepository::new(ctx.pool().clone()));
+    
+    // Initialize services
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository.clone(),
+        "test_secret".to_string(),
+    ));
+    let category_service: Arc<dyn CategoryService> = Arc::new(CategoryServiceImpl::new(
+        category_repository,
+    ));
+    let spending_service: Arc<dyn SpendingService> = Arc::new(SpendingServiceImpl::new(
+        spending_repository,
+        category_service,
+    ));
+
+    use spending_tracker::handlers::spending_handlers::list_entries_handler;
+
+    // Create app with spending routes
+    let app = Router::new()
+        .route("/api/spending", post(create_entry_handler))
+        .route("/api/spending", axum::routing::get(list_entries_handler))
+        .with_state(spending_service);
+
+    // Register a user
+    let email = unique_email("multiple_entries");
+    let register_request = spending_tracker::models::user::CreateUserRequest {
+        name: "Multiple Entries User".to_string(),
+        email: email.clone(),
+        password: "password123".to_string(),
+        default_currency: Some("USD".to_string()),
+    };
+    
+    let user = auth_service.register(register_request).await.unwrap();
+
+    // Create multiple spending entries
+    let entries_data = vec![
+        (25.50, "2024-01-10", "groceries"),
+        (150.00, "2024-01-15", "restaurant"),
+        (75.25, "2024-01-20", "transportation"),
+    ];
+
+    for (amount, date, category) in entries_data {
+        let spending_body = json!({
+            "amount": amount,
+            "date": date,
+            "categories": [category],
+            "is_recurring": false,
+            "currency_code": "USD"
+        });
+        
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/spending")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&spending_body).unwrap()))
+            .unwrap();
+        
+        request.extensions_mut().insert(
+            spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+                user_id: user.id,
+            }
+        );
+
+        let response = app.clone()
+            .oneshot(request)
+            .await
+            .unwrap();
+        
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    // List all entries
+    let mut list_request = Request::builder()
+        .method("GET")
+        .uri("/api/spending")
+        .body(Body::empty())
+        .unwrap();
+    
+    list_request.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user.id,
+        }
+    );
+
+    let list_response = app
+        .oneshot(list_request)
+        .await
+        .unwrap();
+    
+    assert_eq!(list_response.status(), StatusCode::OK);
+    
+    let body = parse_json_body(list_response.into_body()).await;
+    assert!(body.is_array());
+    let entries = body.as_array().unwrap();
+    assert_eq!(entries.len(), 3, "Should return all 3 entries");
+    
+    // Verify all entries have required fields
+    for entry in entries {
+        assert!(entry["id"].is_string());
+        assert!(entry["user_id"].is_string());
+        assert!(entry["amount"].is_string());
+        assert!(entry["date"].is_string());
+        assert!(entry["currency_code"].is_string());
+        assert!(entry["is_recurring"].is_boolean());
+        assert!(entry["category_ids"].is_array());
+        assert!(entry["created_at"].is_string());
+        assert!(entry["updated_at"].is_string());
+    }
+}
+
+#[tokio::test]
+async fn test_list_entries_descending_date_sort() {
+    let ctx = TestContext::new().await;
+    
+    // Initialize repositories
+    let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
+    let category_repository = Arc::new(PostgresCategoryRepository::new(ctx.pool().clone()));
+    let spending_repository = Arc::new(PostgresSpendingRepository::new(ctx.pool().clone()));
+    
+    // Initialize services
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository.clone(),
+        "test_secret".to_string(),
+    ));
+    let category_service: Arc<dyn CategoryService> = Arc::new(CategoryServiceImpl::new(
+        category_repository,
+    ));
+    let spending_service: Arc<dyn SpendingService> = Arc::new(SpendingServiceImpl::new(
+        spending_repository,
+        category_service,
+    ));
+
+    use spending_tracker::handlers::spending_handlers::list_entries_handler;
+
+    // Create app with spending routes
+    let app = Router::new()
+        .route("/api/spending", post(create_entry_handler))
+        .route("/api/spending", axum::routing::get(list_entries_handler))
+        .with_state(spending_service);
+
+    // Register a user
+    let email = unique_email("date_sort");
+    let register_request = spending_tracker::models::user::CreateUserRequest {
+        name: "Date Sort User".to_string(),
+        email: email.clone(),
+        password: "password123".to_string(),
+        default_currency: Some("USD".to_string()),
+    };
+    
+    let user = auth_service.register(register_request).await.unwrap();
+
+    // Create entries with different dates (not in chronological order)
+    let entries_data = vec![
+        (50.00, "2024-01-15", "groceries"),
+        (100.00, "2024-01-25", "restaurant"),
+        (25.00, "2024-01-05", "transportation"),
+        (75.00, "2024-01-20", "entertainment"),
+    ];
+
+    for (amount, date, category) in entries_data {
+        let spending_body = json!({
+            "amount": amount,
+            "date": date,
+            "categories": [category],
+            "is_recurring": false,
+            "currency_code": "USD"
+        });
+        
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/spending")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&spending_body).unwrap()))
+            .unwrap();
+        
+        request.extensions_mut().insert(
+            spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+                user_id: user.id,
+            }
+        );
+
+        let response = app.clone()
+            .oneshot(request)
+            .await
+            .unwrap();
+        
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    // List all entries
+    let mut list_request = Request::builder()
+        .method("GET")
+        .uri("/api/spending")
+        .body(Body::empty())
+        .unwrap();
+    
+    list_request.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user.id,
+        }
+    );
+
+    let list_response = app
+        .oneshot(list_request)
+        .await
+        .unwrap();
+    
+    assert_eq!(list_response.status(), StatusCode::OK);
+    
+    let body = parse_json_body(list_response.into_body()).await;
+    assert!(body.is_array());
+    let entries = body.as_array().unwrap();
+    assert_eq!(entries.len(), 4);
+    
+    // Verify entries are sorted by date in descending order (most recent first)
+    assert_eq!(entries[0]["date"], "2024-01-25", "First entry should be most recent");
+    assert_eq!(entries[0]["amount"], "100.00");
+    
+    assert_eq!(entries[1]["date"], "2024-01-20");
+    assert_eq!(entries[1]["amount"], "75.00");
+    
+    assert_eq!(entries[2]["date"], "2024-01-15");
+    assert_eq!(entries[2]["amount"], "50.00");
+    
+    assert_eq!(entries[3]["date"], "2024-01-05", "Last entry should be oldest");
+    assert_eq!(entries[3]["amount"], "25.00");
+}
