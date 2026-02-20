@@ -385,7 +385,7 @@ mod tests {
     #[tokio::test]
     async fn test_predefined_categories_constant() {
         // Verify the predefined categories constant has the expected values
-        assert_eq!(PREDEFINED_CATEGORIES.len(), 10);
+        assert_eq!(PREDEFINED_CATEGORIES.len(), 17);
         assert!(PREDEFINED_CATEGORIES.contains(&"groceries"));
         assert!(PREDEFINED_CATEGORIES.contains(&"restaurant"));
         assert!(PREDEFINED_CATEGORIES.contains(&"travel"));
@@ -396,5 +396,12 @@ mod tests {
         assert!(PREDEFINED_CATEGORIES.contains(&"shopping"));
         assert!(PREDEFINED_CATEGORIES.contains(&"education"));
         assert!(PREDEFINED_CATEGORIES.contains(&"personal_care"));
+        assert!(PREDEFINED_CATEGORIES.contains(&"housing"));
+        assert!(PREDEFINED_CATEGORIES.contains(&"debt_payment"));
+        assert!(PREDEFINED_CATEGORIES.contains(&"savings"));
+        assert!(PREDEFINED_CATEGORIES.contains(&"clothing"));
+        assert!(PREDEFINED_CATEGORIES.contains(&"household_supplies"));
+        assert!(PREDEFINED_CATEGORIES.contains(&"insurance"));
+        assert!(PREDEFINED_CATEGORIES.contains(&"kids"));
     }
 }

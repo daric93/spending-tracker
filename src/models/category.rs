@@ -16,6 +16,13 @@ pub const PREDEFINED_CATEGORIES: &[&str] = &[
     "shopping",
     "education",
     "personal_care",
+    "housing",
+    "debt_payment",
+    "savings",
+    "clothing",
+    "household_supplies",
+    "insurance",
+    "kids",
 ];
 
 /// Type of category - either predefined (system-provided) or custom (user-created)

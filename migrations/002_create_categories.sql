@@ -27,5 +27,12 @@ INSERT INTO categories (name, category_type, user_id) VALUES
     ('healthcare', 'predefined', NULL),
     ('shopping', 'predefined', NULL),
     ('education', 'predefined', NULL),
-    ('personal_care', 'predefined', NULL)
+    ('personal_care', 'predefined', NULL),
+    ('housing', 'predefined', NULL),
+    ('debt_payment', 'predefined', NULL),
+    ('savings', 'predefined', NULL),
+    ('clothing', 'predefined', NULL),
+    ('household_supplies', 'predefined', NULL),
+    ('insurance', 'predefined', NULL),
+    ('kids', 'predefined', NULL)
 ON CONFLICT (name, user_id) DO NOTHING;
