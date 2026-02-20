@@ -202,6 +202,41 @@ pub async fn update_entry_handler(
     }
 }
 
+/// Handler for deleting a spending entry
+///
+/// Deletes an existing spending entry for the authenticated user.
+#[utoipa::path(
+    delete,
+    path = "/api/spending/{id}",
+    params(
+        ("id" = Uuid, Path, description = "Spending entry ID")
+    ),
+    responses(
+        (status = 204, description = "Spending entry successfully deleted"),
+        (status = 403, description = "User doesn't own the entry", body = ErrorResponse),
+        (status = 404, description = "Entry not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    security(
+        ("bearer_auth" = [])
+    ),
+    tag = "spending"
+)]
+pub async fn delete_entry_handler(
+    State(spending_service): State<Arc<dyn SpendingService>>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
+    axum::extract::Path(entry_id): axum::extract::Path<Uuid>,
+) -> Result<StatusCode, Response> {
+    // Call spending service to delete entry
+    match spending_service
+        .delete_entry(auth_user.user_id, entry_id)
+        .await
+    {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => Err(e.into_response()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +321,21 @@ mod tests {
             user_entries.sort_by(|a, b| b.date.cmp(&a.date));
             
             Ok(user_entries)
+        }
+
+        async fn delete(&self, id: Uuid) -> Result<(), RepositoryError> {
+            if self.should_fail {
+                return Err(RepositoryError::DatabaseError(
+                    "Database connection failed".to_string(),
+                ));
+            }
+
+            let mut entries = self.entries.lock().unwrap();
+            if entries.remove(&id).is_some() {
+                Ok(())
+            } else {
+                Err(RepositoryError::NotFound)
+            }
         }
     }
 
@@ -682,5 +732,161 @@ mod tests {
         let error = SpendingError::DatabaseError("Connection failed".to_string());
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_delete_entry_handler_success() {
+        let spending_repo = Arc::new(MockSpendingRepository::new());
+        let category_service = Arc::new(MockCategoryService::new());
+        let spending_service: Arc<dyn SpendingService> = Arc::new(
+            crate::services::spending_service::SpendingServiceImpl::new(
+                spending_repo.clone(),
+                category_service,
+            ),
+        );
+
+        let user_id = Uuid::new_v4();
+        let entry_id = Uuid::new_v4();
+
+        // First create an entry
+        let entry = SpendingEntry {
+            id: entry_id,
+            user_id,
+            amount: Decimal::from_str("50.00").unwrap(),
+            date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            category_ids: vec![Uuid::new_v4()],
+            is_recurring: false,
+            recurrence_pattern: None,
+            currency_code: "USD".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        spending_repo.create(entry).await.unwrap();
+
+        // Now delete it
+        let result = delete_entry_handler(
+            State(spending_service),
+            Extension(AuthenticatedUser { user_id }),
+            axum::extract::Path(entry_id),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let status = result.unwrap();
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn test_delete_entry_handler_not_found() {
+        let spending_repo = Arc::new(MockSpendingRepository::new());
+        let category_service = Arc::new(MockCategoryService::new());
+        let spending_service: Arc<dyn SpendingService> = Arc::new(
+            crate::services::spending_service::SpendingServiceImpl::new(
+                spending_repo,
+                category_service,
+            ),
+        );
+
+        let user_id = Uuid::new_v4();
+        let non_existent_id = Uuid::new_v4();
+
+        let result = delete_entry_handler(
+            State(spending_service),
+            Extension(AuthenticatedUser { user_id }),
+            axum::extract::Path(non_existent_id),
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_entry_handler_unauthorized() {
+        let spending_repo = Arc::new(MockSpendingRepository::new());
+        let category_service = Arc::new(MockCategoryService::new());
+        let spending_service: Arc<dyn SpendingService> = Arc::new(
+            crate::services::spending_service::SpendingServiceImpl::new(
+                spending_repo.clone(),
+                category_service,
+            ),
+        );
+
+        let owner_id = Uuid::new_v4();
+        let other_user_id = Uuid::new_v4();
+        let entry_id = Uuid::new_v4();
+
+        // Create an entry owned by owner_id
+        let entry = SpendingEntry {
+            id: entry_id,
+            user_id: owner_id,
+            amount: Decimal::from_str("50.00").unwrap(),
+            date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            category_ids: vec![Uuid::new_v4()],
+            is_recurring: false,
+            recurrence_pattern: None,
+            currency_code: "USD".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        spending_repo.create(entry).await.unwrap();
+
+        // Try to delete with a different user
+        let result = delete_entry_handler(
+            State(spending_service),
+            Extension(AuthenticatedUser { user_id: other_user_id }),
+            axum::extract::Path(entry_id),
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_entry_handler_verifies_removal() {
+        let spending_repo = Arc::new(MockSpendingRepository::new());
+        let category_service = Arc::new(MockCategoryService::new());
+        let spending_service: Arc<dyn SpendingService> = Arc::new(
+            crate::services::spending_service::SpendingServiceImpl::new(
+                spending_repo.clone(),
+                category_service,
+            ),
+        );
+
+        let user_id = Uuid::new_v4();
+        let entry_id = Uuid::new_v4();
+
+        // Create an entry
+        let entry = SpendingEntry {
+            id: entry_id,
+            user_id,
+            amount: Decimal::from_str("75.00").unwrap(),
+            date: NaiveDate::from_ymd_opt(2024, 1, 20).unwrap(),
+            category_ids: vec![Uuid::new_v4()],
+            is_recurring: false,
+            recurrence_pattern: None,
+            currency_code: "USD".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        spending_repo.create(entry).await.unwrap();
+
+        // Verify entry exists before deletion
+        let found_entry = spending_repo.find_by_id(entry_id).await.unwrap();
+        assert!(found_entry.is_some(), "Entry should exist before deletion");
+
+        // Delete the entry
+        let result = delete_entry_handler(
+            State(spending_service),
+            Extension(AuthenticatedUser { user_id }),
+            axum::extract::Path(entry_id),
+        )
+        .await;
+
+        assert!(result.is_ok(), "Deletion should succeed");
+        assert_eq!(result.unwrap(), StatusCode::NO_CONTENT);
+
+        // Verify entry is removed after deletion
+        let found_entry = spending_repo.find_by_id(entry_id).await.unwrap();
+        assert!(found_entry.is_none(), "Entry should be removed after deletion");
     }
 }

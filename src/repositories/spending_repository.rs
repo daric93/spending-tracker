@@ -31,6 +31,9 @@ pub trait SpendingRepository: Send + Sync {
 
     /// Find all spending entries for a user, sorted by date descending
     async fn find_by_user(&self, user_id: Uuid) -> Result<Vec<SpendingEntry>, RepositoryError>;
+
+    /// Delete a spending entry by ID
+    async fn delete(&self, id: Uuid) -> Result<(), RepositoryError>;
 }
 
 /// PostgreSQL implementation of SpendingRepository
@@ -360,5 +363,31 @@ impl SpendingRepository for PostgresSpendingRepository {
         }
 
         Ok(spending_entries)
+    }
+
+    async fn delete(&self, id: Uuid) -> Result<(), RepositoryError> {
+        // Delete the spending entry
+        // The CASCADE constraint on spending_entry_categories will automatically
+        // delete associated category relationships
+        let result = sqlx::query!(
+            r#"
+            DELETE FROM spending_entries
+            WHERE id = $1
+            "#,
+            id
+        )
+        .execute(&self.pool)
+        .await;
+
+        match result {
+            Ok(query_result) => {
+                if query_result.rows_affected() == 0 {
+                    Err(RepositoryError::NotFound)
+                } else {
+                    Ok(())
+                }
+            }
+            Err(e) => Err(RepositoryError::DatabaseError(e.to_string())),
+        }
     }
 }

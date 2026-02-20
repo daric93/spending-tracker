@@ -51,6 +51,13 @@ pub trait SpendingService: Send + Sync {
         entry_id: Uuid,
         request: UpdateSpendingRequest,
     ) -> Result<SpendingEntry, SpendingError>;
+
+    /// Delete a spending entry
+    async fn delete_entry(
+        &self,
+        user_id: Uuid,
+        entry_id: Uuid,
+    ) -> Result<(), SpendingError>;
 }
 
 /// Implementation of SpendingService
@@ -239,6 +246,38 @@ impl SpendingService for SpendingServiceImpl {
             })
     }
 
+    async fn delete_entry(
+        &self,
+        user_id: Uuid,
+        entry_id: Uuid,
+    ) -> Result<(), SpendingError> {
+        // Find existing entry
+        let existing_entry = self
+            .spending_repository
+            .find_by_id(entry_id)
+            .await
+            .map_err(|e| match e {
+                RepositoryError::NotFound => SpendingError::EntryNotFound,
+                RepositoryError::DatabaseError(msg) => SpendingError::DatabaseError(msg),
+                RepositoryError::ConstraintViolation(msg) => SpendingError::DatabaseError(msg),
+            })?
+            .ok_or(SpendingError::EntryNotFound)?;
+
+        // Verify user owns the entry
+        if existing_entry.user_id != user_id {
+            return Err(SpendingError::Unauthorized);
+        }
+
+        // Call repository to delete the entry
+        self.spending_repository
+            .delete(entry_id)
+            .await
+            .map_err(|e| match e {
+                RepositoryError::NotFound => SpendingError::EntryNotFound,
+                RepositoryError::DatabaseError(msg) => SpendingError::DatabaseError(msg),
+                RepositoryError::ConstraintViolation(msg) => SpendingError::DatabaseError(msg),
+            })
+    }
 }
 
 #[cfg(test)]
@@ -322,6 +361,21 @@ mod tests {
             user_entries.sort_by(|a, b| b.date.cmp(&a.date));
             
             Ok(user_entries)
+        }
+
+        async fn delete(&self, id: Uuid) -> Result<(), RepositoryError> {
+            if self.should_fail {
+                return Err(RepositoryError::DatabaseError(
+                    "Database connection failed".to_string(),
+                ));
+            }
+
+            let mut entries = self.entries.lock().unwrap();
+            if entries.remove(&id).is_some() {
+                Ok(())
+            } else {
+                Err(RepositoryError::NotFound)
+            }
         }
     }
 
