@@ -17,6 +17,29 @@ pub enum RecurrencePattern {
     Yearly,
 }
 
+impl RecurrencePattern {
+    /// Convert RecurrencePattern to database string representation
+    pub fn to_db_string(&self) -> &'static str {
+        match self {
+            RecurrencePattern::Daily => "daily",
+            RecurrencePattern::Weekly => "weekly",
+            RecurrencePattern::Monthly => "monthly",
+            RecurrencePattern::Yearly => "yearly",
+        }
+    }
+
+    /// Parse RecurrencePattern from database string representation
+    pub fn from_db_string(s: &str) -> Option<Self> {
+        match s {
+            "daily" => Some(RecurrencePattern::Daily),
+            "weekly" => Some(RecurrencePattern::Weekly),
+            "monthly" => Some(RecurrencePattern::Monthly),
+            "yearly" => Some(RecurrencePattern::Yearly),
+            _ => None,
+        }
+    }
+}
+
 /// Category identifier - can be either a UUID or a category name
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(untagged)]

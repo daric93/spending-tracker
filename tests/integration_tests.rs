@@ -1298,3 +1298,515 @@ async fn test_list_entries_descending_date_sort() {
     assert_eq!(entries[3]["date"], "2024-01-05", "Last entry should be oldest");
     assert_eq!(entries[3]["amount"], "25.00");
 }
+
+#[tokio::test]
+async fn test_update_entry_success() {
+    let ctx = TestContext::new().await;
+    
+    // Initialize repositories
+    let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
+    let category_repository = Arc::new(PostgresCategoryRepository::new(ctx.pool().clone()));
+    let spending_repository = Arc::new(PostgresSpendingRepository::new(ctx.pool().clone()));
+    
+    // Initialize services
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository.clone(),
+        "test_secret".to_string(),
+    ));
+    let category_service: Arc<dyn CategoryService> = Arc::new(CategoryServiceImpl::new(
+        category_repository,
+    ));
+    let spending_service: Arc<dyn SpendingService> = Arc::new(SpendingServiceImpl::new(
+        spending_repository,
+        category_service,
+    ));
+
+    use spending_tracker::handlers::spending_handlers::update_entry_handler;
+
+    // Create app with spending routes
+    let app = Router::new()
+        .route("/api/spending", post(create_entry_handler))
+        .route("/api/spending/{id}", axum::routing::put(update_entry_handler))
+        .with_state(spending_service);
+
+    // Register a user
+    let email = unique_email("update_success");
+    let register_request = spending_tracker::models::user::CreateUserRequest {
+        name: "Update Test User".to_string(),
+        email: email.clone(),
+        password: "password123".to_string(),
+        default_currency: Some("USD".to_string()),
+    };
+    
+    let user = auth_service.register(register_request).await.unwrap();
+
+    // Step 1: Create a spending entry
+    let create_body = json!({
+        "amount": 50.00,
+        "date": "2024-01-15",
+        "categories": ["groceries"],
+        "is_recurring": false,
+        "currency_code": "USD"
+    });
+    
+    let mut create_request = Request::builder()
+        .method("POST")
+        .uri("/api/spending")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&create_body).unwrap()))
+        .unwrap();
+    
+    create_request.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user.id,
+        }
+    );
+
+    let create_response = app.clone()
+        .oneshot(create_request)
+        .await
+        .unwrap();
+    
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created_entry = parse_json_body(create_response.into_body()).await;
+    let entry_id = created_entry["id"].as_str().unwrap();
+
+    // Step 2: Update the entry
+    let update_body = json!({
+        "amount": 75.50,
+        "date": "2024-01-20",
+        "categories": ["restaurant"],
+        "is_recurring": true,
+        "recurrence_pattern": "monthly",
+        "currency_code": "EUR"
+    });
+    
+    let mut update_request = Request::builder()
+        .method("PUT")
+        .uri(format!("/api/spending/{}", entry_id))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&update_body).unwrap()))
+        .unwrap();
+    
+    update_request.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user.id,
+        }
+    );
+
+    let update_response = app
+        .oneshot(update_request)
+        .await
+        .unwrap();
+    
+    // Verify response
+    assert_eq!(update_response.status(), StatusCode::OK);
+    
+    let updated_entry = parse_json_body(update_response.into_body()).await;
+    assert_eq!(updated_entry["id"], entry_id);
+    assert_eq!(updated_entry["amount"], "75.50");
+    assert_eq!(updated_entry["date"], "2024-01-20");
+    assert_eq!(updated_entry["currency_code"], "EUR");
+    assert_eq!(updated_entry["is_recurring"], true);
+    assert_eq!(updated_entry["recurrence_pattern"], "monthly");
+    assert!(updated_entry["category_ids"].is_array());
+}
+
+#[tokio::test]
+async fn test_update_entry_non_existent() {
+    let ctx = TestContext::new().await;
+    
+    // Initialize repositories
+    let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
+    let category_repository = Arc::new(PostgresCategoryRepository::new(ctx.pool().clone()));
+    let spending_repository = Arc::new(PostgresSpendingRepository::new(ctx.pool().clone()));
+    
+    // Initialize services
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository.clone(),
+        "test_secret".to_string(),
+    ));
+    let category_service: Arc<dyn CategoryService> = Arc::new(CategoryServiceImpl::new(
+        category_repository,
+    ));
+    let spending_service: Arc<dyn SpendingService> = Arc::new(SpendingServiceImpl::new(
+        spending_repository,
+        category_service,
+    ));
+
+    use spending_tracker::handlers::spending_handlers::update_entry_handler;
+
+    // Create app with spending routes
+    let app = Router::new()
+        .route("/api/spending/{id}", axum::routing::put(update_entry_handler))
+        .with_state(spending_service);
+
+    // Register a user
+    let email = unique_email("update_non_existent");
+    let register_request = spending_tracker::models::user::CreateUserRequest {
+        name: "Update Non-Existent Test User".to_string(),
+        email: email.clone(),
+        password: "password123".to_string(),
+        default_currency: Some("USD".to_string()),
+    };
+    
+    let user = auth_service.register(register_request).await.unwrap();
+
+    // Try to update a non-existent entry
+    let non_existent_id = uuid::Uuid::new_v4();
+    let update_body = json!({
+        "amount": 100.00,
+        "date": "2024-01-20",
+        "categories": ["groceries"]
+    });
+    
+    let mut update_request = Request::builder()
+        .method("PUT")
+        .uri(format!("/api/spending/{}", non_existent_id))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&update_body).unwrap()))
+        .unwrap();
+    
+    update_request.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user.id,
+        }
+    );
+
+    let update_response = app
+        .oneshot(update_request)
+        .await
+        .unwrap();
+    
+    // Verify response - should return 404 Not Found
+    assert_eq!(update_response.status(), StatusCode::NOT_FOUND);
+    
+    let body = parse_json_body(update_response.into_body()).await;
+    assert!(body["error"].is_string());
+    assert_eq!(body["error"], "entry_not_found");
+}
+
+#[tokio::test]
+async fn test_update_entry_unauthorized_different_user() {
+    let ctx = TestContext::new().await;
+    
+    // Initialize repositories
+    let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
+    let category_repository = Arc::new(PostgresCategoryRepository::new(ctx.pool().clone()));
+    let spending_repository = Arc::new(PostgresSpendingRepository::new(ctx.pool().clone()));
+    
+    // Initialize services
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository.clone(),
+        "test_secret".to_string(),
+    ));
+    let category_service: Arc<dyn CategoryService> = Arc::new(CategoryServiceImpl::new(
+        category_repository,
+    ));
+    let spending_service: Arc<dyn SpendingService> = Arc::new(SpendingServiceImpl::new(
+        spending_repository,
+        category_service,
+    ));
+
+    use spending_tracker::handlers::spending_handlers::update_entry_handler;
+
+    // Create app with spending routes
+    let app = Router::new()
+        .route("/api/spending", post(create_entry_handler))
+        .route("/api/spending/{id}", axum::routing::put(update_entry_handler))
+        .with_state(spending_service);
+
+    // Register two users
+    let email1 = unique_email("update_user1");
+    let email2 = unique_email("update_user2");
+    
+    let register_request1 = spending_tracker::models::user::CreateUserRequest {
+        name: "User One".to_string(),
+        email: email1.clone(),
+        password: "password123".to_string(),
+        default_currency: Some("USD".to_string()),
+    };
+    
+    let register_request2 = spending_tracker::models::user::CreateUserRequest {
+        name: "User Two".to_string(),
+        email: email2.clone(),
+        password: "password123".to_string(),
+        default_currency: Some("USD".to_string()),
+    };
+    
+    let user1 = auth_service.register(register_request1).await.unwrap();
+    let user2 = auth_service.register(register_request2).await.unwrap();
+
+    // Step 1: User 1 creates a spending entry
+    let create_body = json!({
+        "amount": 50.00,
+        "date": "2024-01-15",
+        "categories": ["groceries"],
+        "is_recurring": false,
+        "currency_code": "USD"
+    });
+    
+    let mut create_request = Request::builder()
+        .method("POST")
+        .uri("/api/spending")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&create_body).unwrap()))
+        .unwrap();
+    
+    create_request.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user1.id,
+        }
+    );
+
+    let create_response = app.clone()
+        .oneshot(create_request)
+        .await
+        .unwrap();
+    
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created_entry = parse_json_body(create_response.into_body()).await;
+    let entry_id = created_entry["id"].as_str().unwrap();
+
+    // Step 2: User 2 tries to update User 1's entry
+    let update_body = json!({
+        "amount": 100.00,
+        "date": "2024-01-20",
+        "categories": ["restaurant"]
+    });
+    
+    let mut update_request = Request::builder()
+        .method("PUT")
+        .uri(format!("/api/spending/{}", entry_id))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&update_body).unwrap()))
+        .unwrap();
+    
+    update_request.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user2.id,
+        }
+    );
+
+    let update_response = app
+        .oneshot(update_request)
+        .await
+        .unwrap();
+    
+    // Verify response - should return 403 Forbidden
+    assert_eq!(update_response.status(), StatusCode::FORBIDDEN);
+    
+    let body = parse_json_body(update_response.into_body()).await;
+    assert!(body["error"].is_string());
+    assert_eq!(body["error"], "unauthorized");
+}
+
+#[tokio::test]
+async fn test_update_entry_validation_error_negative_amount() {
+    let ctx = TestContext::new().await;
+    
+    // Initialize repositories
+    let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
+    let category_repository = Arc::new(PostgresCategoryRepository::new(ctx.pool().clone()));
+    let spending_repository = Arc::new(PostgresSpendingRepository::new(ctx.pool().clone()));
+    
+    // Initialize services
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository.clone(),
+        "test_secret".to_string(),
+    ));
+    let category_service: Arc<dyn CategoryService> = Arc::new(CategoryServiceImpl::new(
+        category_repository,
+    ));
+    let spending_service: Arc<dyn SpendingService> = Arc::new(SpendingServiceImpl::new(
+        spending_repository,
+        category_service,
+    ));
+
+    use spending_tracker::handlers::spending_handlers::update_entry_handler;
+
+    // Create app with spending routes
+    let app = Router::new()
+        .route("/api/spending", post(create_entry_handler))
+        .route("/api/spending/{id}", axum::routing::put(update_entry_handler))
+        .with_state(spending_service);
+
+    // Register a user
+    let email = unique_email("update_negative_amount");
+    let register_request = spending_tracker::models::user::CreateUserRequest {
+        name: "Update Negative Amount User".to_string(),
+        email: email.clone(),
+        password: "password123".to_string(),
+        default_currency: Some("USD".to_string()),
+    };
+    
+    let user = auth_service.register(register_request).await.unwrap();
+
+    // Step 1: Create a spending entry
+    let create_body = json!({
+        "amount": 50.00,
+        "date": "2024-01-15",
+        "categories": ["groceries"],
+        "is_recurring": false,
+        "currency_code": "USD"
+    });
+    
+    let mut create_request = Request::builder()
+        .method("POST")
+        .uri("/api/spending")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&create_body).unwrap()))
+        .unwrap();
+    
+    create_request.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user.id,
+        }
+    );
+
+    let create_response = app.clone()
+        .oneshot(create_request)
+        .await
+        .unwrap();
+    
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created_entry = parse_json_body(create_response.into_body()).await;
+    let entry_id = created_entry["id"].as_str().unwrap();
+
+    // Step 2: Try to update with negative amount
+    let update_body = json!({
+        "amount": -25.00
+    });
+    
+    let mut update_request = Request::builder()
+        .method("PUT")
+        .uri(format!("/api/spending/{}", entry_id))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&update_body).unwrap()))
+        .unwrap();
+    
+    update_request.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user.id,
+        }
+    );
+
+    let update_response = app
+        .oneshot(update_request)
+        .await
+        .unwrap();
+    
+    // Verify response - should return 400 Bad Request
+    assert_eq!(update_response.status(), StatusCode::BAD_REQUEST);
+    
+    let body = parse_json_body(update_response.into_body()).await;
+    assert!(body["error"].is_string());
+    let message = body["message"].as_str().unwrap().to_lowercase();
+    assert!(message.contains("amount") || message.contains("positive") || message.contains("greater"));
+}
+
+#[tokio::test]
+async fn test_update_entry_partial_update() {
+    let ctx = TestContext::new().await;
+    
+    // Initialize repositories
+    let user_repository = Arc::new(PostgresUserRepository::new(ctx.pool().clone()));
+    let category_repository = Arc::new(PostgresCategoryRepository::new(ctx.pool().clone()));
+    let spending_repository = Arc::new(PostgresSpendingRepository::new(ctx.pool().clone()));
+    
+    // Initialize services
+    let auth_service: Arc<dyn AuthService> = Arc::new(AuthServiceImpl::new(
+        user_repository.clone(),
+        "test_secret".to_string(),
+    ));
+    let category_service: Arc<dyn CategoryService> = Arc::new(CategoryServiceImpl::new(
+        category_repository,
+    ));
+    let spending_service: Arc<dyn SpendingService> = Arc::new(SpendingServiceImpl::new(
+        spending_repository,
+        category_service,
+    ));
+
+    use spending_tracker::handlers::spending_handlers::update_entry_handler;
+
+    // Create app with spending routes
+    let app = Router::new()
+        .route("/api/spending", post(create_entry_handler))
+        .route("/api/spending/{id}", axum::routing::put(update_entry_handler))
+        .with_state(spending_service);
+
+    // Register a user
+    let email = unique_email("update_partial");
+    let register_request = spending_tracker::models::user::CreateUserRequest {
+        name: "Partial Update User".to_string(),
+        email: email.clone(),
+        password: "password123".to_string(),
+        default_currency: Some("USD".to_string()),
+    };
+    
+    let user = auth_service.register(register_request).await.unwrap();
+
+    // Step 1: Create a spending entry
+    let create_body = json!({
+        "amount": 50.00,
+        "date": "2024-01-15",
+        "categories": ["groceries"],
+        "is_recurring": false,
+        "currency_code": "USD"
+    });
+    
+    let mut create_request = Request::builder()
+        .method("POST")
+        .uri("/api/spending")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&create_body).unwrap()))
+        .unwrap();
+    
+    create_request.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user.id,
+        }
+    );
+
+    let create_response = app.clone()
+        .oneshot(create_request)
+        .await
+        .unwrap();
+    
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created_entry = parse_json_body(create_response.into_body()).await;
+    let entry_id = created_entry["id"].as_str().unwrap();
+
+    // Step 2: Update only the amount (partial update)
+    let update_body = json!({
+        "amount": 75.00
+    });
+    
+    let mut update_request = Request::builder()
+        .method("PUT")
+        .uri(format!("/api/spending/{}", entry_id))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&update_body).unwrap()))
+        .unwrap();
+    
+    update_request.extensions_mut().insert(
+        spending_tracker::middleware::auth_middleware::AuthenticatedUser {
+            user_id: user.id,
+        }
+    );
+
+    let update_response = app
+        .oneshot(update_request)
+        .await
+        .unwrap();
+    
+    // Verify response
+    assert_eq!(update_response.status(), StatusCode::OK);
+    
+    let updated_entry = parse_json_body(update_response.into_body()).await;
+    assert_eq!(updated_entry["id"], entry_id);
+    assert_eq!(updated_entry["amount"], "75.00"); // Updated
+    assert_eq!(updated_entry["date"], "2024-01-15"); // Unchanged
+    assert_eq!(updated_entry["currency_code"], "USD"); // Unchanged
+    assert_eq!(updated_entry["is_recurring"], false); // Unchanged
+}

@@ -7,10 +7,11 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use utoipa::ToSchema;
+use uuid::Uuid;
 use validator::Validate;
 
 use crate::middleware::auth_middleware::AuthenticatedUser;
-use crate::models::spending::{CreateSpendingRequest, SpendingEntry};
+use crate::models::spending::{CreateSpendingRequest, SpendingEntry, UpdateSpendingRequest};
 use crate::services::spending_service::{SpendingError, SpendingService};
 
 /// Error response structure
@@ -144,6 +145,63 @@ pub async fn list_entries_handler(
     }
 }
 
+/// Handler for updating a spending entry
+///
+/// Updates an existing spending entry for the authenticated user.
+#[utoipa::path(
+    put,
+    path = "/api/spending/{id}",
+    params(
+        ("id" = Uuid, Path, description = "Spending entry ID")
+    ),
+    request_body = UpdateSpendingRequest,
+    responses(
+        (status = 200, description = "Spending entry successfully updated", body = SpendingEntry),
+        (status = 400, description = "Validation error (negative amount, invalid date)", body = ErrorResponse),
+        (status = 403, description = "User doesn't own the entry", body = ErrorResponse),
+        (status = 404, description = "Entry not found or category not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    security(
+        ("bearer_auth" = [])
+    ),
+    tag = "spending"
+)]
+pub async fn update_entry_handler(
+    State(spending_service): State<Arc<dyn SpendingService>>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
+    axum::extract::Path(entry_id): axum::extract::Path<Uuid>,
+    Json(request): Json<UpdateSpendingRequest>,
+) -> Result<(StatusCode, Json<SpendingEntry>), Response> {
+    // Validate request body
+    if let Err(validation_errors) = request.validate() {
+        let error_message = validation_errors
+            .field_errors()
+            .iter()
+            .map(|(field, errors)| {
+                let messages: Vec<String> = errors
+                    .iter()
+                    .filter_map(|e| e.message.as_ref().map(|m| m.to_string()))
+                    .collect();
+                format!("{}: {}", field, messages.join(", "))
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        let error_response = ErrorResponse::new("validation_error", &error_message);
+        return Err((StatusCode::BAD_REQUEST, Json(error_response)).into_response());
+    }
+
+    // Call spending service to update entry
+    match spending_service
+        .update_entry(auth_user.user_id, entry_id, request)
+        .await
+    {
+        Ok(entry) => Ok((StatusCode::OK, Json(entry))),
+        Err(e) => Err(e.into_response()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +251,22 @@ mod tests {
             let mut entries = self.entries.lock().unwrap();
             entries.insert(entry.id, entry.clone());
             Ok(entry)
+        }
+
+        async fn update(&self, entry: SpendingEntry) -> Result<SpendingEntry, RepositoryError> {
+            if self.should_fail {
+                return Err(RepositoryError::DatabaseError(
+                    "Database connection failed".to_string(),
+                ));
+            }
+
+            let mut entries = self.entries.lock().unwrap();
+            if entries.contains_key(&entry.id) {
+                entries.insert(entry.id, entry.clone());
+                Ok(entry)
+            } else {
+                Err(RepositoryError::NotFound)
+            }
         }
 
         async fn find_by_id(&self, id: Uuid) -> Result<Option<SpendingEntry>, RepositoryError> {

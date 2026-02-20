@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::models::spending::{CreateSpendingRequest, SpendingEntry};
+use crate::models::spending::{CreateSpendingRequest, SpendingEntry, UpdateSpendingRequest};
 use crate::repositories::spending_repository::{RepositoryError, SpendingRepository};
 use crate::services::category_service::{CategoryError, CategoryService};
 
@@ -43,6 +43,14 @@ pub trait SpendingService: Send + Sync {
         &self,
         user_id: Uuid,
     ) -> Result<Vec<SpendingEntry>, SpendingError>;
+
+    /// Update an existing spending entry
+    async fn update_entry(
+        &self,
+        user_id: Uuid,
+        entry_id: Uuid,
+        request: UpdateSpendingRequest,
+    ) -> Result<SpendingEntry, SpendingError>;
 }
 
 /// Implementation of SpendingService
@@ -145,6 +153,92 @@ impl SpendingService for SpendingServiceImpl {
                 RepositoryError::ConstraintViolation(msg) => SpendingError::DatabaseError(msg),
             })
     }
+
+    async fn update_entry(
+        &self,
+        user_id: Uuid,
+        entry_id: Uuid,
+        request: UpdateSpendingRequest,
+    ) -> Result<SpendingEntry, SpendingError> {
+        // Find existing entry
+        let existing_entry = self
+            .spending_repository
+            .find_by_id(entry_id)
+            .await
+            .map_err(|e| match e {
+                RepositoryError::NotFound => SpendingError::EntryNotFound,
+                RepositoryError::DatabaseError(msg) => SpendingError::DatabaseError(msg),
+                RepositoryError::ConstraintViolation(msg) => SpendingError::DatabaseError(msg),
+            })?
+            .ok_or(SpendingError::EntryNotFound)?;
+
+        // Verify user owns the entry
+        if existing_entry.user_id != user_id {
+            return Err(SpendingError::Unauthorized);
+        }
+
+        // Validate amount if provided
+        if let Some(amount) = request.amount {
+            if amount <= rust_decimal::Decimal::ZERO {
+                return Err(SpendingError::InvalidAmount);
+            }
+        }
+
+        // Resolve categories if provided
+        let category_ids = if let Some(categories) = request.categories {
+            let mut resolved_ids = Vec::new();
+            for category_identifier in &categories {
+                let category_id = match category_identifier {
+                    crate::models::spending::CategoryIdentifier::Id(id) => {
+                        // For ID-based lookup, use the ID directly
+                        *id
+                    }
+                    crate::models::spending::CategoryIdentifier::Name(name) => {
+                        // Auto-create category if it doesn't exist
+                        let category = self
+                            .category_service
+                            .get_or_create_by_name(user_id, name)
+                            .await
+                            .map_err(|e| match e {
+                                CategoryError::CategoryNotFound => SpendingError::CategoryNotFound,
+                                CategoryError::DatabaseError(msg) => SpendingError::DatabaseError(msg),
+                                _ => SpendingError::DatabaseError(e.to_string()),
+                            })?;
+                        category.id
+                    }
+                };
+                resolved_ids.push(category_id);
+            }
+            resolved_ids
+        } else {
+            existing_entry.category_ids.clone()
+        };
+
+        // Build updated entry
+        let updated_entry = SpendingEntry {
+            id: entry_id,
+            user_id,
+            amount: request.amount.unwrap_or(existing_entry.amount),
+            date: request.date.unwrap_or(existing_entry.date),
+            category_ids,
+            is_recurring: request.is_recurring.unwrap_or(existing_entry.is_recurring),
+            recurrence_pattern: request.recurrence_pattern.or(existing_entry.recurrence_pattern),
+            currency_code: request.currency_code.unwrap_or(existing_entry.currency_code),
+            created_at: existing_entry.created_at,
+            updated_at: chrono::Utc::now(),
+        };
+
+        // Call repository to persist the update
+        self.spending_repository
+            .update(updated_entry)
+            .await
+            .map_err(|e| match e {
+                RepositoryError::NotFound => SpendingError::EntryNotFound,
+                RepositoryError::DatabaseError(msg) => SpendingError::DatabaseError(msg),
+                RepositoryError::ConstraintViolation(msg) => SpendingError::DatabaseError(msg),
+            })
+    }
+
 }
 
 #[cfg(test)]
@@ -193,6 +287,22 @@ mod tests {
             let mut entries = self.entries.lock().unwrap();
             entries.insert(entry.id, entry.clone());
             Ok(entry)
+        }
+
+        async fn update(&self, entry: SpendingEntry) -> Result<SpendingEntry, RepositoryError> {
+            if self.should_fail {
+                return Err(RepositoryError::DatabaseError(
+                    "Database connection failed".to_string(),
+                ));
+            }
+
+            let mut entries = self.entries.lock().unwrap();
+            if entries.contains_key(&entry.id) {
+                entries.insert(entry.id, entry.clone());
+                Ok(entry)
+            } else {
+                Err(RepositoryError::NotFound)
+            }
         }
 
         async fn find_by_id(&self, id: Uuid) -> Result<Option<SpendingEntry>, RepositoryError> {
@@ -627,5 +737,194 @@ mod tests {
         let user2_entries = service.get_entries(user2_id).await.unwrap();
         assert_eq!(user2_entries.len(), 1);
         assert_eq!(user2_entries[0].user_id, user2_id);
+    }
+
+    #[tokio::test]
+    async fn test_update_entry_with_valid_data() {
+        let repo = Arc::new(MockSpendingRepository::new());
+        let category_service = Arc::new(MockCategoryService::new());
+        let service = SpendingServiceImpl::new(repo.clone(), category_service);
+
+        let user_id = Uuid::new_v4();
+
+        // Step 1: Create an initial entry
+        let create_request = CreateSpendingRequest {
+            amount: Decimal::from_str("50.00").unwrap(),
+            date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            categories: vec![CategoryIdentifier::Name("groceries".to_string())],
+            is_recurring: Some(false),
+            recurrence_pattern: None,
+            currency_code: Some("USD".to_string()),
+        };
+
+        let created_entry = service.create_entry(user_id, create_request).await.unwrap();
+        let entry_id = created_entry.id;
+
+        // Step 2: Update the entry with valid data
+        let update_request = UpdateSpendingRequest {
+            amount: Some(Decimal::from_str("75.50").unwrap()),
+            date: Some(NaiveDate::from_ymd_opt(2024, 1, 20).unwrap()),
+            categories: Some(vec![CategoryIdentifier::Name("restaurant".to_string())]),
+            is_recurring: Some(true),
+            recurrence_pattern: Some(RecurrencePattern::Monthly),
+            currency_code: Some("EUR".to_string()),
+        };
+
+        let result = service.update_entry(user_id, entry_id, update_request).await;
+        assert!(result.is_ok());
+
+        let updated_entry = result.unwrap();
+
+        // Step 3: Verify all fields were updated correctly
+        assert_eq!(updated_entry.id, entry_id);
+        assert_eq!(updated_entry.user_id, user_id);
+        assert_eq!(updated_entry.amount, Decimal::from_str("75.50").unwrap());
+        assert_eq!(updated_entry.date, NaiveDate::from_ymd_opt(2024, 1, 20).unwrap());
+        assert_eq!(updated_entry.is_recurring, true);
+        assert!(updated_entry.recurrence_pattern.is_some());
+        assert_eq!(updated_entry.recurrence_pattern.unwrap(), RecurrencePattern::Monthly);
+        assert_eq!(updated_entry.currency_code, "EUR");
+        assert_eq!(updated_entry.category_ids.len(), 1);
+        
+        // Verify created_at is preserved but updated_at is changed
+        assert_eq!(updated_entry.created_at, created_entry.created_at);
+        assert!(updated_entry.updated_at > created_entry.updated_at);
+    }
+
+    #[tokio::test]
+    async fn test_update_entry_with_negative_amount() {
+        let repo = Arc::new(MockSpendingRepository::new());
+        let category_service = Arc::new(MockCategoryService::new());
+        let service = SpendingServiceImpl::new(repo.clone(), category_service);
+
+        let user_id = Uuid::new_v4();
+
+        // Step 1: Create an initial entry
+        let create_request = CreateSpendingRequest {
+            amount: Decimal::from_str("50.00").unwrap(),
+            date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            categories: vec![CategoryIdentifier::Name("groceries".to_string())],
+            is_recurring: Some(false),
+            recurrence_pattern: None,
+            currency_code: Some("USD".to_string()),
+        };
+
+        let created_entry = service.create_entry(user_id, create_request).await.unwrap();
+        let entry_id = created_entry.id;
+
+        // Step 2: Try to update with negative amount
+        let update_request = UpdateSpendingRequest {
+            amount: Some(Decimal::from_str("-10.00").unwrap()),
+            date: None,
+            categories: None,
+            is_recurring: None,
+            recurrence_pattern: None,
+            currency_code: None,
+        };
+
+        let result = service.update_entry(user_id, entry_id, update_request).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SpendingError::InvalidAmount));
+    }
+
+    #[tokio::test]
+    async fn test_update_entry_with_zero_amount() {
+        let repo = Arc::new(MockSpendingRepository::new());
+        let category_service = Arc::new(MockCategoryService::new());
+        let service = SpendingServiceImpl::new(repo.clone(), category_service);
+
+        let user_id = Uuid::new_v4();
+
+        // Step 1: Create an initial entry
+        let create_request = CreateSpendingRequest {
+            amount: Decimal::from_str("50.00").unwrap(),
+            date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            categories: vec![CategoryIdentifier::Name("groceries".to_string())],
+            is_recurring: Some(false),
+            recurrence_pattern: None,
+            currency_code: Some("USD".to_string()),
+        };
+
+        let created_entry = service.create_entry(user_id, create_request).await.unwrap();
+        let entry_id = created_entry.id;
+
+        // Step 2: Try to update with zero amount
+        let update_request = UpdateSpendingRequest {
+            amount: Some(Decimal::ZERO),
+            date: None,
+            categories: None,
+            is_recurring: None,
+            recurrence_pattern: None,
+            currency_code: None,
+        };
+
+        let result = service.update_entry(user_id, entry_id, update_request).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SpendingError::InvalidAmount));
+    }
+
+    #[tokio::test]
+    async fn test_update_entry_unauthorized_different_user() {
+        let repo = Arc::new(MockSpendingRepository::new());
+        let category_service = Arc::new(MockCategoryService::new());
+        let service = SpendingServiceImpl::new(repo.clone(), category_service);
+
+        let user1_id = Uuid::new_v4();
+        let user2_id = Uuid::new_v4();
+
+        // Step 1: User 1 creates an entry
+        let create_request = CreateSpendingRequest {
+            amount: Decimal::from_str("50.00").unwrap(),
+            date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            categories: vec![CategoryIdentifier::Name("groceries".to_string())],
+            is_recurring: Some(false),
+            recurrence_pattern: None,
+            currency_code: Some("USD".to_string()),
+        };
+
+        let created_entry = service.create_entry(user1_id, create_request).await.unwrap();
+        let entry_id = created_entry.id;
+
+        // Step 2: User 2 tries to update User 1's entry
+        let update_request = UpdateSpendingRequest {
+            amount: Some(Decimal::from_str("100.00").unwrap()),
+            date: None,
+            categories: None,
+            is_recurring: None,
+            recurrence_pattern: None,
+            currency_code: None,
+        };
+
+        let result = service.update_entry(user2_id, entry_id, update_request).await;
+        
+        // Step 3: Verify the update is rejected with Unauthorized error
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SpendingError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn test_update_entry_non_existent() {
+        let repo = Arc::new(MockSpendingRepository::new());
+        let category_service = Arc::new(MockCategoryService::new());
+        let service = SpendingServiceImpl::new(repo.clone(), category_service);
+
+        let user_id = Uuid::new_v4();
+        let non_existent_entry_id = Uuid::new_v4(); // Random UUID that doesn't exist
+
+        // Try to update an entry that doesn't exist
+        let update_request = UpdateSpendingRequest {
+            amount: Some(Decimal::from_str("100.00").unwrap()),
+            date: Some(NaiveDate::from_ymd_opt(2024, 1, 20).unwrap()),
+            categories: Some(vec![CategoryIdentifier::Name("groceries".to_string())]),
+            is_recurring: None,
+            recurrence_pattern: None,
+            currency_code: None,
+        };
+
+        let result = service.update_entry(user_id, non_existent_entry_id, update_request).await;
+        
+        // Verify the update is rejected with EntryNotFound error
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SpendingError::EntryNotFound));
     }
 }
