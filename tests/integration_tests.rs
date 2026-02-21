@@ -2124,3 +2124,269 @@ async fn test_delete_entry_unauthorized_different_user() {
     assert!(body["error"].is_string());
     assert_eq!(body["error"], "unauthorized");
 }
+
+#[tokio::test]
+async fn test_get_total_empty() {
+    let pool = setup_test_db().await;
+    let app = create_test_app(pool.clone()).await;
+
+    // Register and login
+    let (token, _user_id) = register_and_login(&app).await;
+
+    // Get total without any entries
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/spending/total")
+                .header("Authorization", format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let total: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(total["total"], "0");
+    assert_eq!(total["currency"], "USD");
+
+    cleanup_test_db(pool).await;
+}
+
+#[tokio::test]
+async fn test_get_total_with_entries() {
+    let pool = setup_test_db().await;
+    let app = create_test_app(pool.clone()).await;
+
+    // Register and login
+    let (token, _user_id) = register_and_login(&app).await;
+
+    // Create multiple spending entries
+    let entry1 = serde_json::json!({
+        "amount": "42.50",
+        "date": "2024-01-15",
+        "categories": [{"Name": "groceries"}],
+        "is_recurring": false,
+        "currency_code": "USD"
+    });
+
+    let entry2 = serde_json::json!({
+        "amount": "100.00",
+        "date": "2024-01-20",
+        "categories": [{"Name": "restaurant"}],
+        "is_recurring": false,
+        "currency_code": "USD"
+    });
+
+    let entry3 = serde_json::json!({
+        "amount": "25.75",
+        "date": "2024-01-25",
+        "categories": [{"Name": "transportation"}],
+        "is_recurring": false,
+        "currency_code": "USD"
+    });
+
+    // Create entries
+    for entry in [entry1, entry2, entry3] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/spending")
+                    .header("Authorization", format!("Bearer {}", token))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&entry).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    // Get total
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/spending/total")
+                .header("Authorization", format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let total: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // 42.50 + 100.00 + 25.75 = 168.25
+    assert_eq!(total["total"], "168.25");
+    assert_eq!(total["currency"], "USD");
+
+    cleanup_test_db(pool).await;
+}
+
+#[tokio::test]
+async fn test_get_total_user_isolation() {
+    let pool = setup_test_db().await;
+    let app = create_test_app(pool.clone()).await;
+
+    // Register and login user 1
+    let (token1, _user1_id) = register_and_login(&app).await;
+
+    // Register and login user 2
+    let register_request2 = serde_json::json!({
+        "name": "User Two",
+        "email": "user2@example.com",
+        "password": "password123"
+    });
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/register")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&register_request2).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let login_request2 = serde_json::json!({
+        "email": "user2@example.com",
+        "password": "password123"
+    });
+
+    let login_response2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&login_request2).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let login_body2 = to_bytes(login_response2.into_body(), usize::MAX).await.unwrap();
+    let login_data2: serde_json::Value = serde_json::from_slice(&login_body2).unwrap();
+    let token2 = login_data2["token"].as_str().unwrap().to_string();
+
+    // Create entry for user 1
+    let entry1 = serde_json::json!({
+        "amount": "50.00",
+        "date": "2024-01-15",
+        "categories": [{"Name": "groceries"}],
+        "is_recurring": false,
+        "currency_code": "USD"
+    });
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/spending")
+                .header("Authorization", format!("Bearer {}", token1))
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&entry1).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Create entry for user 2
+    let entry2 = serde_json::json!({
+        "amount": "100.00",
+        "date": "2024-01-20",
+        "categories": [{"Name": "restaurant"}],
+        "is_recurring": false,
+        "currency_code": "USD"
+    });
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/spending")
+                .header("Authorization", format!("Bearer {}", token2))
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&entry2).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Get total for user 1
+    let response1 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/spending/total")
+                .header("Authorization", format!("Bearer {}", token1))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body1 = to_bytes(response1.into_body(), usize::MAX).await.unwrap();
+    let total1: serde_json::Value = serde_json::from_slice(&body1).unwrap();
+    assert_eq!(total1["total"], "50.00");
+
+    // Get total for user 2
+    let response2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/spending/total")
+                .header("Authorization", format!("Bearer {}", token2))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body2 = to_bytes(response2.into_body(), usize::MAX).await.unwrap();
+    let total2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
+    assert_eq!(total2["total"], "100.00");
+
+    cleanup_test_db(pool).await;
+}
+
+#[tokio::test]
+async fn test_get_total_without_auth() {
+    let pool = setup_test_db().await;
+    let app = create_test_app(pool.clone()).await;
+
+    // Try to get total without auth token
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/spending/total")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    cleanup_test_db(pool).await;
+}

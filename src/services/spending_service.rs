@@ -30,6 +30,8 @@ pub enum SpendingError {
 
 /// Trait defining spending service operations
 #[async_trait]
+/// Trait defining spending service operations
+#[async_trait]
 pub trait SpendingService: Send + Sync {
     /// Create a new spending entry
     async fn create_entry(
@@ -58,6 +60,12 @@ pub trait SpendingService: Send + Sync {
         user_id: Uuid,
         entry_id: Uuid,
     ) -> Result<(), SpendingError>;
+
+    /// Get total spending for a user
+    async fn get_total(
+        &self,
+        user_id: Uuid,
+    ) -> Result<crate::models::SpendingTotal, SpendingError>;
 }
 
 /// Implementation of SpendingService
@@ -278,6 +286,28 @@ impl SpendingService for SpendingServiceImpl {
                 RepositoryError::ConstraintViolation(msg) => SpendingError::DatabaseError(msg),
             })
     }
+
+    async fn get_total(
+        &self,
+        user_id: Uuid,
+    ) -> Result<crate::models::SpendingTotal, SpendingError> {
+        // Call repository to calculate total
+        let total = self
+            .spending_repository
+            .calculate_total(user_id)
+            .await
+            .map_err(|e| match e {
+                RepositoryError::NotFound => SpendingError::EntryNotFound,
+                RepositoryError::DatabaseError(msg) => SpendingError::DatabaseError(msg),
+                RepositoryError::ConstraintViolation(msg) => SpendingError::DatabaseError(msg),
+            })?;
+
+        // Return SpendingTotal with total and default currency (USD for now)
+        Ok(crate::models::SpendingTotal {
+            total,
+            currency: "USD".to_string(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -376,6 +406,16 @@ mod tests {
             } else {
                 Err(RepositoryError::NotFound)
             }
+        }
+
+        async fn calculate_total(&self, user_id: Uuid) -> Result<rust_decimal::Decimal, RepositoryError> {
+            let entries = self.entries.lock().unwrap();
+            let total = entries
+                .values()
+                .filter(|e| e.user_id == user_id)
+                .map(|e| e.amount)
+                .sum();
+            Ok(total)
         }
     }
 
@@ -980,5 +1020,152 @@ mod tests {
         // Verify the update is rejected with EntryNotFound error
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), SpendingError::EntryNotFound));
+    }
+
+    #[tokio::test]
+    async fn test_get_total_calculation_accuracy() {
+        let repo = Arc::new(MockSpendingRepository::new());
+        let category_service = Arc::new(MockCategoryService::new());
+        let service = SpendingServiceImpl::new(repo, category_service);
+
+        let user_id = Uuid::new_v4();
+
+        // Create multiple entries with different amounts
+        let request1 = CreateSpendingRequest {
+            amount: Decimal::from_str("42.50").unwrap(),
+            date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            categories: vec![CategoryIdentifier::Name("groceries".to_string())],
+            is_recurring: Some(false),
+            recurrence_pattern: None,
+            currency_code: Some("USD".to_string()),
+        };
+
+        let request2 = CreateSpendingRequest {
+            amount: Decimal::from_str("100.00").unwrap(),
+            date: NaiveDate::from_ymd_opt(2024, 1, 20).unwrap(),
+            categories: vec![CategoryIdentifier::Name("restaurant".to_string())],
+            is_recurring: Some(false),
+            recurrence_pattern: None,
+            currency_code: Some("USD".to_string()),
+        };
+
+        let request3 = CreateSpendingRequest {
+            amount: Decimal::from_str("25.75").unwrap(),
+            date: NaiveDate::from_ymd_opt(2024, 1, 25).unwrap(),
+            categories: vec![CategoryIdentifier::Name("transportation".to_string())],
+            is_recurring: Some(false),
+            recurrence_pattern: None,
+            currency_code: Some("USD".to_string()),
+        };
+
+        service.create_entry(user_id, request1).await.unwrap();
+        service.create_entry(user_id, request2).await.unwrap();
+        service.create_entry(user_id, request3).await.unwrap();
+
+        // Get total
+        let result = service.get_total(user_id).await;
+        assert!(result.is_ok());
+
+        let total = result.unwrap();
+        // 42.50 + 100.00 + 25.75 = 168.25
+        assert_eq!(total.total, Decimal::from_str("168.25").unwrap());
+        assert_eq!(total.currency, "USD");
+    }
+
+    #[tokio::test]
+    async fn test_get_total_decimal_precision() {
+        let repo = Arc::new(MockSpendingRepository::new());
+        let category_service = Arc::new(MockCategoryService::new());
+        let service = SpendingServiceImpl::new(repo, category_service);
+
+        let user_id = Uuid::new_v4();
+
+        // Create entries with precise decimal amounts
+        let request1 = CreateSpendingRequest {
+            amount: Decimal::from_str("10.99").unwrap(),
+            date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            categories: vec![CategoryIdentifier::Name("groceries".to_string())],
+            is_recurring: Some(false),
+            recurrence_pattern: None,
+            currency_code: Some("USD".to_string()),
+        };
+
+        let request2 = CreateSpendingRequest {
+            amount: Decimal::from_str("20.01").unwrap(),
+            date: NaiveDate::from_ymd_opt(2024, 1, 20).unwrap(),
+            categories: vec![CategoryIdentifier::Name("restaurant".to_string())],
+            is_recurring: Some(false),
+            recurrence_pattern: None,
+            currency_code: Some("USD".to_string()),
+        };
+
+        service.create_entry(user_id, request1).await.unwrap();
+        service.create_entry(user_id, request2).await.unwrap();
+
+        // Get total
+        let result = service.get_total(user_id).await;
+        assert!(result.is_ok());
+
+        let total = result.unwrap();
+        // 10.99 + 20.01 = 31.00 (exact precision preserved)
+        assert_eq!(total.total, Decimal::from_str("31.00").unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_get_total_zero_when_no_entries() {
+        let repo = Arc::new(MockSpendingRepository::new());
+        let category_service = Arc::new(MockCategoryService::new());
+        let service = SpendingServiceImpl::new(repo, category_service);
+
+        let user_id = Uuid::new_v4();
+
+        // Get total for user with no entries
+        let result = service.get_total(user_id).await;
+        assert!(result.is_ok());
+
+        let total = result.unwrap();
+        assert_eq!(total.total, Decimal::ZERO);
+        assert_eq!(total.currency, "USD");
+    }
+
+    #[tokio::test]
+    async fn test_get_total_user_isolation() {
+        let repo = Arc::new(MockSpendingRepository::new());
+        let category_service = Arc::new(MockCategoryService::new());
+        let service = SpendingServiceImpl::new(repo, category_service);
+
+        let user1_id = Uuid::new_v4();
+        let user2_id = Uuid::new_v4();
+
+        // Create entries for user1
+        let request1 = CreateSpendingRequest {
+            amount: Decimal::from_str("50.00").unwrap(),
+            date: NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            categories: vec![CategoryIdentifier::Name("groceries".to_string())],
+            is_recurring: Some(false),
+            recurrence_pattern: None,
+            currency_code: Some("USD".to_string()),
+        };
+
+        // Create entries for user2
+        let request2 = CreateSpendingRequest {
+            amount: Decimal::from_str("100.00").unwrap(),
+            date: NaiveDate::from_ymd_opt(2024, 1, 20).unwrap(),
+            categories: vec![CategoryIdentifier::Name("restaurant".to_string())],
+            is_recurring: Some(false),
+            recurrence_pattern: None,
+            currency_code: Some("USD".to_string()),
+        };
+
+        service.create_entry(user1_id, request1).await.unwrap();
+        service.create_entry(user2_id, request2).await.unwrap();
+
+        // Get total for user1
+        let user1_total = service.get_total(user1_id).await.unwrap();
+        assert_eq!(user1_total.total, Decimal::from_str("50.00").unwrap());
+
+        // Get total for user2
+        let user2_total = service.get_total(user2_id).await.unwrap();
+        assert_eq!(user2_total.total, Decimal::from_str("100.00").unwrap());
     }
 }

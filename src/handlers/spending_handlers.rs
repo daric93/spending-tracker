@@ -237,6 +237,32 @@ pub async fn delete_entry_handler(
     }
 }
 
+/// Handler for getting spending total
+///
+/// Calculates the total spending for the authenticated user.
+#[utoipa::path(
+    get,
+    path = "/api/spending/total",
+    responses(
+        (status = 200, description = "Spending total", body = crate::models::SpendingTotal),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    security(
+        ("bearer_auth" = [])
+    ),
+    tag = "spending"
+)]
+pub async fn get_total_handler(
+    State(spending_service): State<Arc<dyn SpendingService>>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
+) -> Result<Json<crate::models::SpendingTotal>, Response> {
+    // Call spending service to get total
+    match spending_service.get_total(auth_user.user_id).await {
+        Ok(total) => Ok(Json(total)),
+        Err(e) => Err(e.into_response()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +362,16 @@ mod tests {
             } else {
                 Err(RepositoryError::NotFound)
             }
+        }
+
+        async fn calculate_total(&self, user_id: Uuid) -> Result<rust_decimal::Decimal, RepositoryError> {
+            let entries = self.entries.lock().unwrap();
+            let total = entries
+                .values()
+                .filter(|e| e.user_id == user_id)
+                .map(|e| e.amount)
+                .sum();
+            Ok(total)
         }
     }
 

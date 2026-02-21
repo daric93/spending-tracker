@@ -19,6 +19,8 @@ pub enum RepositoryError {
 
 /// Trait defining spending repository operations
 #[async_trait]
+/// Trait defining spending repository operations
+#[async_trait]
 pub trait SpendingRepository: Send + Sync {
     /// Create a new spending entry
     async fn create(&self, entry: SpendingEntry) -> Result<SpendingEntry, RepositoryError>;
@@ -34,6 +36,9 @@ pub trait SpendingRepository: Send + Sync {
 
     /// Delete a spending entry by ID
     async fn delete(&self, id: Uuid) -> Result<(), RepositoryError>;
+
+    /// Calculate total spending for a user
+    async fn calculate_total(&self, user_id: Uuid) -> Result<rust_decimal::Decimal, RepositoryError>;
 }
 
 /// PostgreSQL implementation of SpendingRepository
@@ -387,6 +392,25 @@ impl SpendingRepository for PostgresSpendingRepository {
                     Ok(())
                 }
             }
+            Err(e) => Err(RepositoryError::DatabaseError(e.to_string())),
+        }
+    }
+
+    async fn calculate_total(&self, user_id: Uuid) -> Result<rust_decimal::Decimal, RepositoryError> {
+        // Calculate the sum of all spending entries for the user
+        let result = sqlx::query!(
+            r#"
+            SELECT COALESCE(SUM(amount), 0) as total
+            FROM spending_entries
+            WHERE user_id = $1
+            "#,
+            user_id
+        )
+        .fetch_one(&self.pool)
+        .await;
+
+        match result {
+            Ok(row) => Ok(row.total.unwrap_or(rust_decimal::Decimal::ZERO)),
             Err(e) => Err(RepositoryError::DatabaseError(e.to_string())),
         }
     }
