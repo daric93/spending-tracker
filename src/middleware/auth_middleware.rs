@@ -1,9 +1,9 @@
 use axum::{
+    Json,
     extract::{Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -46,7 +46,9 @@ pub async fn auth_middleware(
         })?;
 
     // Add user_id to request extensions
-    request.extensions_mut().insert(AuthenticatedUser { user_id });
+    request
+        .extensions_mut()
+        .insert(AuthenticatedUser { user_id });
 
     // Continue to next handler
     Ok(next.run(request).await)
@@ -64,22 +66,13 @@ pub enum AuthError {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            AuthError::MissingToken => (
-                StatusCode::UNAUTHORIZED,
-                "Missing authorization token",
-            ),
+            AuthError::MissingToken => (StatusCode::UNAUTHORIZED, "Missing authorization token"),
             AuthError::InvalidTokenFormat => (
                 StatusCode::UNAUTHORIZED,
                 "Invalid authorization header format. Expected: Bearer <token>",
             ),
-            AuthError::InvalidToken => (
-                StatusCode::UNAUTHORIZED,
-                "Invalid or malformed token",
-            ),
-            AuthError::TokenExpired => (
-                StatusCode::UNAUTHORIZED,
-                "Token has expired",
-            ),
+            AuthError::InvalidToken => (StatusCode::UNAUTHORIZED, "Invalid or malformed token"),
+            AuthError::TokenExpired => (StatusCode::UNAUTHORIZED, "Token has expired"),
         };
 
         let body = Json(json!({
@@ -99,11 +92,11 @@ mod tests {
     use crate::services::auth_service::{AuthService, AuthServiceImpl};
     use async_trait::async_trait;
     use axum::{
+        Router,
         body::Body,
         http::{Request, StatusCode},
         middleware,
         routing::get,
-        Router,
     };
     use chrono::Utc;
     use std::collections::HashMap;
@@ -182,9 +175,7 @@ mod tests {
             .with_state(auth_service)
     }
 
-    async fn create_test_user_and_token(
-        auth_service: &Arc<dyn AuthService>,
-    ) -> (User, AuthToken) {
+    async fn create_test_user_and_token(auth_service: &Arc<dyn AuthService>) -> (User, AuthToken) {
         let register_request = CreateUserRequest {
             name: "Test User".to_string(),
             email: "test@example.com".to_string(),
@@ -255,10 +246,12 @@ mod tests {
             .unwrap();
         let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert!(body_json["error"]
-            .as_str()
-            .unwrap()
-            .contains("Missing authorization token"));
+        assert!(
+            body_json["error"]
+                .as_str()
+                .unwrap()
+                .contains("Missing authorization token")
+        );
     }
 
     #[tokio::test]
@@ -284,10 +277,12 @@ mod tests {
             .unwrap();
         let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert!(body_json["error"]
-            .as_str()
-            .unwrap()
-            .contains("Invalid or malformed token"));
+        assert!(
+            body_json["error"]
+                .as_str()
+                .unwrap()
+                .contains("Invalid or malformed token")
+        );
     }
 
     #[tokio::test]
@@ -314,9 +309,11 @@ mod tests {
             .unwrap();
         let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert!(body_json["error"]
-            .as_str()
-            .unwrap()
-            .contains("Invalid authorization header format"));
+        assert!(
+            body_json["error"]
+                .as_str()
+                .unwrap()
+                .contains("Invalid authorization header format")
+        );
     }
 }

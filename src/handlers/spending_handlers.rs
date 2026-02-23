@@ -1,8 +1,8 @@
 use axum::{
-    extract::{Extension, State},
+    Json,
+    extract::{Extension, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -11,6 +11,7 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::middleware::auth_middleware::AuthenticatedUser;
+use crate::models::filters::SpendingFilters;
 use crate::models::spending::{CreateSpendingRequest, SpendingEntry, UpdateSpendingRequest};
 use crate::services::spending_service::{SpendingError, SpendingService};
 
@@ -114,19 +115,33 @@ pub async fn create_entry_handler(
     }
 
     // Call spending service to create entry
-    match spending_service.create_entry(auth_user.user_id, request).await {
+    match spending_service
+        .create_entry(auth_user.user_id, request)
+        .await
+    {
         Ok(entry) => Ok((StatusCode::CREATED, Json(entry))),
         Err(e) => Err(e.into_response()),
     }
 }
 /// Handler for listing spending entries
 ///
-/// Retrieves all spending entries for the authenticated user, sorted by date descending.
+/// Retrieves spending entries for the authenticated user with optional filters, sorted by date descending.
 #[utoipa::path(
     get,
     path = "/api/spending",
+    params(
+        ("date" = Option<String>, Query, description = "Filter by exact date (YYYY-MM-DD)"),
+        ("start" = Option<String>, Query, description = "Filter by date range start (YYYY-MM-DD)"),
+        ("end" = Option<String>, Query, description = "Filter by date range end (YYYY-MM-DD)"),
+        ("category_id" = Option<Uuid>, Query, description = "Filter by category ID"),
+        ("is_recurring" = Option<bool>, Query, description = "Filter by recurring status"),
+        ("currency_code" = Option<String>, Query, description = "Filter by currency code"),
+        ("page" = Option<u32>, Query, description = "Page number for pagination (1-indexed)"),
+        ("page_size" = Option<u32>, Query, description = "Page size for pagination")
+    ),
     responses(
         (status = 200, description = "List of spending entries", body = Vec<SpendingEntry>),
+        (status = 400, description = "Invalid date range (end before start)", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     security(
@@ -137,9 +152,24 @@ pub async fn create_entry_handler(
 pub async fn list_entries_handler(
     State(spending_service): State<Arc<dyn SpendingService>>,
     Extension(auth_user): Extension<AuthenticatedUser>,
+    Query(filters): Query<SpendingFilters>,
 ) -> Result<Json<Vec<SpendingEntry>>, Response> {
-    // Call spending service to get all entries for the user
-    match spending_service.get_entries(auth_user.user_id).await {
+    // Validate date range if provided
+    if let Some(ref date_range) = filters.date_range
+        && !date_range.is_valid()
+    {
+        let error_response = ErrorResponse::new(
+            "invalid_date_range",
+            "End date must be greater than or equal to start date",
+        );
+        return Err((StatusCode::BAD_REQUEST, Json(error_response)).into_response());
+    }
+
+    // Call spending service to get entries with filters
+    match spending_service
+        .get_entries(auth_user.user_id, filters)
+        .await
+    {
         Ok(entries) => Ok(Json(entries)),
         Err(e) => Err(e.into_response()),
     }
@@ -239,12 +269,21 @@ pub async fn delete_entry_handler(
 
 /// Handler for getting spending total
 ///
-/// Calculates the total spending for the authenticated user.
+/// Calculates the total spending for the authenticated user with optional filters.
 #[utoipa::path(
     get,
     path = "/api/spending/total",
+    params(
+        ("date" = Option<String>, Query, description = "Filter by exact date (YYYY-MM-DD)"),
+        ("start" = Option<String>, Query, description = "Filter by date range start (YYYY-MM-DD)"),
+        ("end" = Option<String>, Query, description = "Filter by date range end (YYYY-MM-DD)"),
+        ("category_id" = Option<Uuid>, Query, description = "Filter by category ID"),
+        ("is_recurring" = Option<bool>, Query, description = "Filter by recurring status"),
+        ("currency_code" = Option<String>, Query, description = "Filter by currency code")
+    ),
     responses(
         (status = 200, description = "Spending total", body = crate::models::SpendingTotal),
+        (status = 400, description = "Invalid date range (end before start)", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     security(
@@ -255,10 +294,92 @@ pub async fn delete_entry_handler(
 pub async fn get_total_handler(
     State(spending_service): State<Arc<dyn SpendingService>>,
     Extension(auth_user): Extension<AuthenticatedUser>,
+    Query(filters): Query<SpendingFilters>,
 ) -> Result<Json<crate::models::SpendingTotal>, Response> {
-    // Call spending service to get total
-    match spending_service.get_total(auth_user.user_id).await {
+    // Validate date range if provided
+    if let Some(ref date_range) = filters.date_range
+        && !date_range.is_valid()
+    {
+        let error_response = ErrorResponse::new(
+            "invalid_date_range",
+            "End date must be greater than or equal to start date",
+        );
+        return Err((StatusCode::BAD_REQUEST, Json(error_response)).into_response());
+    }
+
+    // Call spending service to get total with filters
+    match spending_service.get_total(auth_user.user_id, filters).await {
         Ok(total) => Ok(Json(total)),
+        Err(e) => Err(e.into_response()),
+    }
+}
+
+/// Query parameters for chart data endpoint
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ChartQueryParams {
+    /// Start date for filtering (YYYY-MM-DD format)
+    pub start: Option<chrono::NaiveDate>,
+    /// End date for filtering (YYYY-MM-DD format)
+    pub end: Option<chrono::NaiveDate>,
+}
+
+/// Handler for getting category chart data
+///
+/// Returns spending totals grouped by category for the authenticated user.
+/// Defaults to current month if no date range is provided.
+#[utoipa::path(
+    get,
+    path = "/api/spending/chart",
+    params(
+        ("start" = Option<String>, Query, description = "Start date (YYYY-MM-DD)"),
+        ("end" = Option<String>, Query, description = "End date (YYYY-MM-DD)")
+    ),
+    responses(
+        (status = 200, description = "Category chart data retrieved successfully", body = crate::models::filters::ChartData),
+        (status = 400, description = "Invalid date range (end before start)", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    security(
+        ("bearer_auth" = [])
+    ),
+    tag = "spending"
+)]
+pub async fn get_chart_handler(
+    State(spending_service): State<Arc<dyn SpendingService>>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
+    Query(params): Query<ChartQueryParams>,
+) -> Result<Json<crate::models::filters::ChartData>, Response> {
+    // Build date range from query params if both start and end are provided
+    let date_range = match (params.start, params.end) {
+        (Some(start), Some(end)) => {
+            let range = crate::models::filters::DateRange { start, end };
+            // Validate date range
+            if !range.is_valid() {
+                let error_response = ErrorResponse::new(
+                    "invalid_date_range",
+                    "End date must be greater than or equal to start date",
+                );
+                return Err((StatusCode::BAD_REQUEST, Json(error_response)).into_response());
+            }
+            Some(range)
+        }
+        (None, None) => None, // No date range provided, will default to current month in service
+        _ => {
+            // Only one of start or end provided
+            let error_response = ErrorResponse::new(
+                "invalid_date_range",
+                "Both start and end dates must be provided together",
+            );
+            return Err((StatusCode::BAD_REQUEST, Json(error_response)).into_response());
+        }
+    };
+
+    // Call spending service to get chart data
+    match spending_service
+        .get_chart_data(auth_user.user_id, date_range)
+        .await
+    {
+        Ok(chart_data) => Ok(Json(chart_data)),
         Err(e) => Err(e.into_response()),
     }
 }
@@ -335,17 +456,21 @@ mod tests {
             Ok(entries.get(&id).cloned())
         }
 
-        async fn find_by_user(&self, user_id: Uuid) -> Result<Vec<SpendingEntry>, RepositoryError> {
+        async fn find_by_user(
+            &self,
+            user_id: Uuid,
+            _filters: crate::models::SpendingFilters,
+        ) -> Result<Vec<SpendingEntry>, RepositoryError> {
             let entries = self.entries.lock().unwrap();
             let mut user_entries: Vec<SpendingEntry> = entries
                 .values()
                 .filter(|e| e.user_id == user_id)
                 .cloned()
                 .collect();
-            
+
             // Sort by date descending (most recent first)
             user_entries.sort_by(|a, b| b.date.cmp(&a.date));
-            
+
             Ok(user_entries)
         }
 
@@ -364,7 +489,11 @@ mod tests {
             }
         }
 
-        async fn calculate_total(&self, user_id: Uuid) -> Result<rust_decimal::Decimal, RepositoryError> {
+        async fn calculate_total(
+            &self,
+            user_id: Uuid,
+            _filters: crate::models::SpendingFilters,
+        ) -> Result<rust_decimal::Decimal, RepositoryError> {
             let entries = self.entries.lock().unwrap();
             let total = entries
                 .values()
@@ -372,6 +501,17 @@ mod tests {
                 .map(|e| e.amount)
                 .sum();
             Ok(total)
+        }
+
+        async fn group_by_category(
+            &self,
+            user_id: Uuid,
+            _date_range: Option<crate::models::filters::DateRange>,
+        ) -> Result<Vec<crate::models::filters::CategorySpending>, RepositoryError> {
+            // For mock implementation, return empty vec
+            // In real tests, this would need to be properly implemented
+            let _ = user_id;
+            Ok(vec![])
         }
     }
 
@@ -384,7 +524,7 @@ mod tests {
     impl MockCategoryService {
         fn new() -> Self {
             let mut categories = HashMap::new();
-            
+
             // Add a predefined category
             let groceries_category = Category {
                 id: Uuid::new_v4(),
@@ -422,13 +562,11 @@ mod tests {
             name: &str,
         ) -> Result<Category, CategoryError> {
             if self.should_fail {
-                return Err(CategoryError::DatabaseError(
-                    "Database error".to_string(),
-                ));
+                return Err(CategoryError::DatabaseError("Database error".to_string()));
             }
 
             let mut categories = self.categories.lock().unwrap();
-            
+
             if let Some(category) = categories.get(name) {
                 return Ok(category.clone());
             }
@@ -450,12 +588,11 @@ mod tests {
     async fn test_create_entry_handler_success() {
         let spending_repo = Arc::new(MockSpendingRepository::new());
         let category_service = Arc::new(MockCategoryService::new());
-        let spending_service: Arc<dyn SpendingService> = Arc::new(
-            crate::services::spending_service::SpendingServiceImpl::new(
+        let spending_service: Arc<dyn SpendingService> =
+            Arc::new(crate::services::spending_service::SpendingServiceImpl::new(
                 spending_repo,
                 category_service,
-            ),
-        );
+            ));
 
         let user_id = Uuid::new_v4();
         let request = CreateSpendingRequest {
@@ -486,12 +623,11 @@ mod tests {
     async fn test_create_entry_handler_validation_error_negative_amount() {
         let spending_repo = Arc::new(MockSpendingRepository::new());
         let category_service = Arc::new(MockCategoryService::new());
-        let spending_service: Arc<dyn SpendingService> = Arc::new(
-            crate::services::spending_service::SpendingServiceImpl::new(
+        let spending_service: Arc<dyn SpendingService> =
+            Arc::new(crate::services::spending_service::SpendingServiceImpl::new(
                 spending_repo,
                 category_service,
-            ),
-        );
+            ));
 
         let user_id = Uuid::new_v4();
         let request = CreateSpendingRequest {
@@ -517,12 +653,11 @@ mod tests {
     async fn test_create_entry_handler_validation_error_empty_categories() {
         let spending_repo = Arc::new(MockSpendingRepository::new());
         let category_service = Arc::new(MockCategoryService::new());
-        let spending_service: Arc<dyn SpendingService> = Arc::new(
-            crate::services::spending_service::SpendingServiceImpl::new(
+        let spending_service: Arc<dyn SpendingService> =
+            Arc::new(crate::services::spending_service::SpendingServiceImpl::new(
                 spending_repo,
                 category_service,
-            ),
-        );
+            ));
 
         let user_id = Uuid::new_v4();
         let request = CreateSpendingRequest {
@@ -548,12 +683,11 @@ mod tests {
     async fn test_create_entry_handler_auto_creates_custom_category() {
         let spending_repo = Arc::new(MockSpendingRepository::new());
         let category_service = Arc::new(MockCategoryService::new());
-        let spending_service: Arc<dyn SpendingService> = Arc::new(
-            crate::services::spending_service::SpendingServiceImpl::new(
+        let spending_service: Arc<dyn SpendingService> =
+            Arc::new(crate::services::spending_service::SpendingServiceImpl::new(
                 spending_repo,
                 category_service,
-            ),
-        );
+            ));
 
         let user_id = Uuid::new_v4();
         let request = CreateSpendingRequest {
@@ -582,12 +716,11 @@ mod tests {
     async fn test_create_entry_handler_database_error() {
         let spending_repo = Arc::new(MockSpendingRepository::with_failure());
         let category_service = Arc::new(MockCategoryService::new());
-        let spending_service: Arc<dyn SpendingService> = Arc::new(
-            crate::services::spending_service::SpendingServiceImpl::new(
+        let spending_service: Arc<dyn SpendingService> =
+            Arc::new(crate::services::spending_service::SpendingServiceImpl::new(
                 spending_repo,
                 category_service,
-            ),
-        );
+            ));
 
         let user_id = Uuid::new_v4();
         let request = CreateSpendingRequest {
@@ -613,12 +746,11 @@ mod tests {
     async fn test_create_entry_handler_category_service_error() {
         let spending_repo = Arc::new(MockSpendingRepository::new());
         let category_service = Arc::new(MockCategoryService::with_failure());
-        let spending_service: Arc<dyn SpendingService> = Arc::new(
-            crate::services::spending_service::SpendingServiceImpl::new(
+        let spending_service: Arc<dyn SpendingService> =
+            Arc::new(crate::services::spending_service::SpendingServiceImpl::new(
                 spending_repo,
                 category_service,
-            ),
-        );
+            ));
 
         let user_id = Uuid::new_v4();
         let request = CreateSpendingRequest {
@@ -644,12 +776,11 @@ mod tests {
     async fn test_create_entry_handler_with_recurring_pattern() {
         let spending_repo = Arc::new(MockSpendingRepository::new());
         let category_service = Arc::new(MockCategoryService::new());
-        let spending_service: Arc<dyn SpendingService> = Arc::new(
-            crate::services::spending_service::SpendingServiceImpl::new(
+        let spending_service: Arc<dyn SpendingService> =
+            Arc::new(crate::services::spending_service::SpendingServiceImpl::new(
                 spending_repo,
                 category_service,
-            ),
-        );
+            ));
 
         let user_id = Uuid::new_v4();
         let request = CreateSpendingRequest {
@@ -679,12 +810,11 @@ mod tests {
     async fn test_create_entry_handler_default_currency() {
         let spending_repo = Arc::new(MockSpendingRepository::new());
         let category_service = Arc::new(MockCategoryService::new());
-        let spending_service: Arc<dyn SpendingService> = Arc::new(
-            crate::services::spending_service::SpendingServiceImpl::new(
+        let spending_service: Arc<dyn SpendingService> =
+            Arc::new(crate::services::spending_service::SpendingServiceImpl::new(
                 spending_repo,
                 category_service,
-            ),
-        );
+            ));
 
         let user_id = Uuid::new_v4();
         let request = CreateSpendingRequest {
@@ -714,12 +844,11 @@ mod tests {
         // Create mock repository and services
         let spending_repo = Arc::new(MockSpendingRepository::new());
         let category_service = Arc::new(MockCategoryService::new());
-        let spending_service: Arc<dyn SpendingService> = Arc::new(
-            crate::services::spending_service::SpendingServiceImpl::new(
+        let spending_service: Arc<dyn SpendingService> =
+            Arc::new(crate::services::spending_service::SpendingServiceImpl::new(
                 spending_repo,
                 category_service,
-            ),
-        );
+            ));
 
         let user_id = Uuid::new_v4();
         let auth_user = AuthenticatedUser { user_id };
@@ -728,13 +857,18 @@ mod tests {
         let result = list_entries_handler(
             State(spending_service),
             Extension(auth_user),
+            Query(crate::models::SpendingFilters::default()),
         )
         .await;
 
         // Verify the result is Ok and contains an empty vector
         assert!(result.is_ok(), "Handler should return Ok for empty list");
         let entries = result.unwrap().0;
-        assert_eq!(entries.len(), 0, "Should return empty list when no entries exist");
+        assert_eq!(
+            entries.len(),
+            0,
+            "Should return empty list when no entries exist"
+        );
     }
 
     #[tokio::test]
@@ -774,12 +908,11 @@ mod tests {
     async fn test_delete_entry_handler_success() {
         let spending_repo = Arc::new(MockSpendingRepository::new());
         let category_service = Arc::new(MockCategoryService::new());
-        let spending_service: Arc<dyn SpendingService> = Arc::new(
-            crate::services::spending_service::SpendingServiceImpl::new(
+        let spending_service: Arc<dyn SpendingService> =
+            Arc::new(crate::services::spending_service::SpendingServiceImpl::new(
                 spending_repo.clone(),
                 category_service,
-            ),
-        );
+            ));
 
         let user_id = Uuid::new_v4();
         let entry_id = Uuid::new_v4();
@@ -816,12 +949,11 @@ mod tests {
     async fn test_delete_entry_handler_not_found() {
         let spending_repo = Arc::new(MockSpendingRepository::new());
         let category_service = Arc::new(MockCategoryService::new());
-        let spending_service: Arc<dyn SpendingService> = Arc::new(
-            crate::services::spending_service::SpendingServiceImpl::new(
+        let spending_service: Arc<dyn SpendingService> =
+            Arc::new(crate::services::spending_service::SpendingServiceImpl::new(
                 spending_repo,
                 category_service,
-            ),
-        );
+            ));
 
         let user_id = Uuid::new_v4();
         let non_existent_id = Uuid::new_v4();
@@ -840,12 +972,11 @@ mod tests {
     async fn test_delete_entry_handler_unauthorized() {
         let spending_repo = Arc::new(MockSpendingRepository::new());
         let category_service = Arc::new(MockCategoryService::new());
-        let spending_service: Arc<dyn SpendingService> = Arc::new(
-            crate::services::spending_service::SpendingServiceImpl::new(
+        let spending_service: Arc<dyn SpendingService> =
+            Arc::new(crate::services::spending_service::SpendingServiceImpl::new(
                 spending_repo.clone(),
                 category_service,
-            ),
-        );
+            ));
 
         let owner_id = Uuid::new_v4();
         let other_user_id = Uuid::new_v4();
@@ -869,7 +1000,9 @@ mod tests {
         // Try to delete with a different user
         let result = delete_entry_handler(
             State(spending_service),
-            Extension(AuthenticatedUser { user_id: other_user_id }),
+            Extension(AuthenticatedUser {
+                user_id: other_user_id,
+            }),
             axum::extract::Path(entry_id),
         )
         .await;
@@ -881,12 +1014,11 @@ mod tests {
     async fn test_delete_entry_handler_verifies_removal() {
         let spending_repo = Arc::new(MockSpendingRepository::new());
         let category_service = Arc::new(MockCategoryService::new());
-        let spending_service: Arc<dyn SpendingService> = Arc::new(
-            crate::services::spending_service::SpendingServiceImpl::new(
+        let spending_service: Arc<dyn SpendingService> =
+            Arc::new(crate::services::spending_service::SpendingServiceImpl::new(
                 spending_repo.clone(),
                 category_service,
-            ),
-        );
+            ));
 
         let user_id = Uuid::new_v4();
         let entry_id = Uuid::new_v4();
@@ -923,6 +1055,18 @@ mod tests {
 
         // Verify entry is removed after deletion
         let found_entry = spending_repo.find_by_id(entry_id).await.unwrap();
-        assert!(found_entry.is_none(), "Entry should be removed after deletion");
+        assert!(
+            found_entry.is_none(),
+            "Entry should be removed after deletion"
+        );
     }
+
+    // TODO: Add integration tests for category filtering
+    // The following tests should be implemented as integration tests in tests/integration_tests.rs:
+    // 1. test_category_filter_accuracy - Test filtering by single category ID
+    // 2. test_combined_date_and_category_filters - Test filtering by date range AND category
+    // 3. test_comprehensive_filtering_with_multiple_criteria - Test filtering by category, recurring status, and currency
+    //
+    // These tests require a real database connection to properly test the filtering logic
+    // in the repository layer, as the mock repository doesn't implement filtering.
 }

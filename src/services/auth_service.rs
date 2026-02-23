@@ -382,7 +382,10 @@ mod tests {
 
         // Verify token can be validated
         let validated_user_id = service.validate_token(&auth_token.token).await.unwrap();
-        assert_eq!(validated_user_id, user.id, "Token should contain correct user_id");
+        assert_eq!(
+            validated_user_id, user.id,
+            "Token should contain correct user_id"
+        );
     }
 
     #[tokio::test]
@@ -435,7 +438,10 @@ mod tests {
 
         assert_eq!(validated_id1, user1.id);
         assert_eq!(validated_id2, user2.id);
-        assert_ne!(validated_id1, validated_id2, "Different users should have different IDs");
+        assert_ne!(
+            validated_id1, validated_id2,
+            "Different users should have different IDs"
+        );
     }
 
     #[tokio::test]
@@ -471,7 +477,9 @@ mod tests {
 
         // Verify expiration is approximately 24 hours from now (with 1 minute tolerance)
         let expected_expiration = now + Duration::hours(24);
-        let diff = (auth_token.expires_at - expected_expiration).num_seconds().abs();
+        let diff = (auth_token.expires_at - expected_expiration)
+            .num_seconds()
+            .abs();
         assert!(
             diff < 60,
             "Token should expire in approximately 24 hours (diff: {} seconds)",
@@ -536,4 +544,3 @@ mod tests {
         }
     }
 }
-

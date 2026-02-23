@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::models::filters::SpendingFilters;
 use crate::models::spending::{CreateSpendingRequest, SpendingEntry, UpdateSpendingRequest};
 use crate::repositories::spending_repository::{RepositoryError, SpendingRepository};
 use crate::services::category_service::{CategoryError, CategoryService};
@@ -40,10 +41,11 @@ pub trait SpendingService: Send + Sync {
         request: CreateSpendingRequest,
     ) -> Result<SpendingEntry, SpendingError>;
 
-    /// Get all spending entries for a user, sorted by date descending
+    /// Get spending entries for a user with optional filters, sorted by date descending
     async fn get_entries(
         &self,
         user_id: Uuid,
+        filters: SpendingFilters,
     ) -> Result<Vec<SpendingEntry>, SpendingError>;
 
     /// Update an existing spending entry
@@ -55,17 +57,21 @@ pub trait SpendingService: Send + Sync {
     ) -> Result<SpendingEntry, SpendingError>;
 
     /// Delete a spending entry
-    async fn delete_entry(
-        &self,
-        user_id: Uuid,
-        entry_id: Uuid,
-    ) -> Result<(), SpendingError>;
+    async fn delete_entry(&self, user_id: Uuid, entry_id: Uuid) -> Result<(), SpendingError>;
 
-    /// Get total spending for a user
+    /// Get total spending for a user with optional filters
     async fn get_total(
         &self,
         user_id: Uuid,
+        filters: SpendingFilters,
     ) -> Result<crate::models::SpendingTotal, SpendingError>;
+
+    /// Get category chart data for a user with optional date range
+    async fn get_chart_data(
+        &self,
+        user_id: Uuid,
+        date_range: Option<crate::models::filters::DateRange>,
+    ) -> Result<crate::models::filters::ChartData, SpendingError>;
 }
 
 /// Implementation of SpendingService
@@ -156,11 +162,19 @@ impl SpendingService for SpendingServiceImpl {
     async fn get_entries(
         &self,
         user_id: Uuid,
+        filters: SpendingFilters,
     ) -> Result<Vec<SpendingEntry>, SpendingError> {
-        // Call repository to fetch all entries for the user
+        // Validate date_range if provided (end >= start)
+        if let Some(ref date_range) = filters.date_range
+            && !date_range.is_valid()
+        {
+            return Err(SpendingError::InvalidDate);
+        }
+
+        // Call repository to fetch entries with filters
         // Repository already returns entries sorted by date descending
         self.spending_repository
-            .find_by_user(user_id)
+            .find_by_user(user_id, filters)
             .await
             .map_err(|e| match e {
                 RepositoryError::NotFound => SpendingError::EntryNotFound,
@@ -193,10 +207,10 @@ impl SpendingService for SpendingServiceImpl {
         }
 
         // Validate amount if provided
-        if let Some(amount) = request.amount {
-            if amount <= rust_decimal::Decimal::ZERO {
-                return Err(SpendingError::InvalidAmount);
-            }
+        if let Some(amount) = request.amount
+            && amount <= rust_decimal::Decimal::ZERO
+        {
+            return Err(SpendingError::InvalidAmount);
         }
 
         // Resolve categories if provided
@@ -216,7 +230,9 @@ impl SpendingService for SpendingServiceImpl {
                             .await
                             .map_err(|e| match e {
                                 CategoryError::CategoryNotFound => SpendingError::CategoryNotFound,
-                                CategoryError::DatabaseError(msg) => SpendingError::DatabaseError(msg),
+                                CategoryError::DatabaseError(msg) => {
+                                    SpendingError::DatabaseError(msg)
+                                }
                                 _ => SpendingError::DatabaseError(e.to_string()),
                             })?;
                         category.id
@@ -237,8 +253,12 @@ impl SpendingService for SpendingServiceImpl {
             date: request.date.unwrap_or(existing_entry.date),
             category_ids,
             is_recurring: request.is_recurring.unwrap_or(existing_entry.is_recurring),
-            recurrence_pattern: request.recurrence_pattern.or(existing_entry.recurrence_pattern),
-            currency_code: request.currency_code.unwrap_or(existing_entry.currency_code),
+            recurrence_pattern: request
+                .recurrence_pattern
+                .or(existing_entry.recurrence_pattern),
+            currency_code: request
+                .currency_code
+                .unwrap_or(existing_entry.currency_code),
             created_at: existing_entry.created_at,
             updated_at: chrono::Utc::now(),
         };
@@ -254,11 +274,7 @@ impl SpendingService for SpendingServiceImpl {
             })
     }
 
-    async fn delete_entry(
-        &self,
-        user_id: Uuid,
-        entry_id: Uuid,
-    ) -> Result<(), SpendingError> {
+    async fn delete_entry(&self, user_id: Uuid, entry_id: Uuid) -> Result<(), SpendingError> {
         // Find existing entry
         let existing_entry = self
             .spending_repository
@@ -290,11 +306,19 @@ impl SpendingService for SpendingServiceImpl {
     async fn get_total(
         &self,
         user_id: Uuid,
+        filters: SpendingFilters,
     ) -> Result<crate::models::SpendingTotal, SpendingError> {
-        // Call repository to calculate total
+        // Validate date_range if provided (end >= start)
+        if let Some(ref date_range) = filters.date_range
+            && !date_range.is_valid()
+        {
+            return Err(SpendingError::InvalidDate);
+        }
+
+        // Call repository to calculate total with filters
         let total = self
             .spending_repository
-            .calculate_total(user_id)
+            .calculate_total(user_id, filters)
             .await
             .map_err(|e| match e {
                 RepositoryError::NotFound => SpendingError::EntryNotFound,
@@ -308,12 +332,44 @@ impl SpendingService for SpendingServiceImpl {
             currency: "USD".to_string(),
         })
     }
+
+    async fn get_chart_data(
+        &self,
+        user_id: Uuid,
+        date_range: Option<crate::models::filters::DateRange>,
+    ) -> Result<crate::models::filters::ChartData, SpendingError> {
+        // Validate date_range if provided (end >= start)
+        if let Some(ref range) = date_range
+            && !range.is_valid()
+        {
+            return Err(SpendingError::InvalidDate);
+        }
+
+        // Call repository to group spending by category
+        let categories = self
+            .spending_repository
+            .group_by_category(user_id, date_range.clone())
+            .await
+            .map_err(|e| match e {
+                RepositoryError::NotFound => SpendingError::EntryNotFound,
+                RepositoryError::DatabaseError(msg) => SpendingError::DatabaseError(msg),
+                RepositoryError::ConstraintViolation(msg) => SpendingError::DatabaseError(msg),
+            })?;
+
+        // Return ChartData with categories and date_range
+        Ok(crate::models::filters::ChartData {
+            categories,
+            date_range,
+            grouped_by_currency: false, // For now, not grouping by currency
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::category::{Category, CategoryType};
+    use crate::models::filters::SpendingFilters;
     use crate::models::spending::{CategoryIdentifier, RecurrencePattern};
     use async_trait::async_trait;
     use chrono::{NaiveDate, Utc};
@@ -379,17 +435,21 @@ mod tests {
             Ok(entries.get(&id).cloned())
         }
 
-        async fn find_by_user(&self, user_id: Uuid) -> Result<Vec<SpendingEntry>, RepositoryError> {
+        async fn find_by_user(
+            &self,
+            user_id: Uuid,
+            _filters: SpendingFilters,
+        ) -> Result<Vec<SpendingEntry>, RepositoryError> {
             let entries = self.entries.lock().unwrap();
             let mut user_entries: Vec<SpendingEntry> = entries
                 .values()
                 .filter(|e| e.user_id == user_id)
                 .cloned()
                 .collect();
-            
+
             // Sort by date descending (most recent first)
             user_entries.sort_by(|a, b| b.date.cmp(&a.date));
-            
+
             Ok(user_entries)
         }
 
@@ -408,7 +468,11 @@ mod tests {
             }
         }
 
-        async fn calculate_total(&self, user_id: Uuid) -> Result<rust_decimal::Decimal, RepositoryError> {
+        async fn calculate_total(
+            &self,
+            user_id: Uuid,
+            _filters: SpendingFilters,
+        ) -> Result<rust_decimal::Decimal, RepositoryError> {
             let entries = self.entries.lock().unwrap();
             let total = entries
                 .values()
@@ -416,6 +480,17 @@ mod tests {
                 .map(|e| e.amount)
                 .sum();
             Ok(total)
+        }
+
+        async fn group_by_category(
+            &self,
+            user_id: Uuid,
+            _date_range: Option<crate::models::filters::DateRange>,
+        ) -> Result<Vec<crate::models::filters::CategorySpending>, RepositoryError> {
+            // For mock implementation, return empty vec
+            // In real tests, this would need to be properly implemented
+            let _ = user_id;
+            Ok(vec![])
         }
     }
 
@@ -469,9 +544,7 @@ mod tests {
             name: &str,
         ) -> Result<Category, CategoryError> {
             if self.should_fail {
-                return Err(CategoryError::DatabaseError(
-                    "Database error".to_string(),
-                ));
+                return Err(CategoryError::DatabaseError("Database error".to_string()));
             }
 
             let mut categories = self.categories.lock().unwrap();
@@ -516,7 +589,7 @@ mod tests {
         assert_eq!(entry.amount, Decimal::from_str("42.50").unwrap());
         assert_eq!(entry.user_id, user_id);
         assert_eq!(entry.currency_code, "USD");
-        assert_eq!(entry.is_recurring, false);
+        assert!(!entry.is_recurring);
         assert_eq!(entry.category_ids.len(), 1);
     }
 
@@ -679,9 +752,12 @@ mod tests {
         assert!(result.is_ok());
 
         let entry = result.unwrap();
-        assert_eq!(entry.is_recurring, true);
+        assert!(entry.is_recurring);
         assert!(entry.recurrence_pattern.is_some());
-        assert_eq!(entry.recurrence_pattern.unwrap(), RecurrencePattern::Monthly);
+        assert_eq!(
+            entry.recurrence_pattern.unwrap(),
+            RecurrencePattern::Monthly
+        );
     }
 
     #[tokio::test]
@@ -763,15 +839,23 @@ mod tests {
         service.create_entry(user_id, request2).await.unwrap();
 
         // Get all entries
-        let result = service.get_entries(user_id).await;
+        let result = service
+            .get_entries(user_id, SpendingFilters::default())
+            .await;
         assert!(result.is_ok());
 
         let entries = result.unwrap();
         assert_eq!(entries.len(), 2);
-        
+
         // Verify entries are sorted by date descending (most recent first)
-        assert_eq!(entries[0].date, NaiveDate::from_ymd_opt(2024, 1, 20).unwrap());
-        assert_eq!(entries[1].date, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        assert_eq!(
+            entries[0].date,
+            NaiveDate::from_ymd_opt(2024, 1, 20).unwrap()
+        );
+        assert_eq!(
+            entries[1].date,
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -783,7 +867,9 @@ mod tests {
         let user_id = Uuid::new_v4();
 
         // Get entries for user with no entries
-        let result = service.get_entries(user_id).await;
+        let result = service
+            .get_entries(user_id, SpendingFilters::default())
+            .await;
         assert!(result.is_ok());
 
         let entries = result.unwrap();
@@ -823,12 +909,18 @@ mod tests {
         service.create_entry(user2_id, request2).await.unwrap();
 
         // Get entries for user1
-        let user1_entries = service.get_entries(user1_id).await.unwrap();
+        let user1_entries = service
+            .get_entries(user1_id, SpendingFilters::default())
+            .await
+            .unwrap();
         assert_eq!(user1_entries.len(), 1);
         assert_eq!(user1_entries[0].user_id, user1_id);
 
         // Get entries for user2
-        let user2_entries = service.get_entries(user2_id).await.unwrap();
+        let user2_entries = service
+            .get_entries(user2_id, SpendingFilters::default())
+            .await
+            .unwrap();
         assert_eq!(user2_entries.len(), 1);
         assert_eq!(user2_entries[0].user_id, user2_id);
     }
@@ -864,7 +956,9 @@ mod tests {
             currency_code: Some("EUR".to_string()),
         };
 
-        let result = service.update_entry(user_id, entry_id, update_request).await;
+        let result = service
+            .update_entry(user_id, entry_id, update_request)
+            .await;
         assert!(result.is_ok());
 
         let updated_entry = result.unwrap();
@@ -873,13 +967,19 @@ mod tests {
         assert_eq!(updated_entry.id, entry_id);
         assert_eq!(updated_entry.user_id, user_id);
         assert_eq!(updated_entry.amount, Decimal::from_str("75.50").unwrap());
-        assert_eq!(updated_entry.date, NaiveDate::from_ymd_opt(2024, 1, 20).unwrap());
-        assert_eq!(updated_entry.is_recurring, true);
+        assert_eq!(
+            updated_entry.date,
+            NaiveDate::from_ymd_opt(2024, 1, 20).unwrap()
+        );
+        assert!(updated_entry.is_recurring);
         assert!(updated_entry.recurrence_pattern.is_some());
-        assert_eq!(updated_entry.recurrence_pattern.unwrap(), RecurrencePattern::Monthly);
+        assert_eq!(
+            updated_entry.recurrence_pattern.unwrap(),
+            RecurrencePattern::Monthly
+        );
         assert_eq!(updated_entry.currency_code, "EUR");
         assert_eq!(updated_entry.category_ids.len(), 1);
-        
+
         // Verify created_at is preserved but updated_at is changed
         assert_eq!(updated_entry.created_at, created_entry.created_at);
         assert!(updated_entry.updated_at > created_entry.updated_at);
@@ -916,7 +1016,9 @@ mod tests {
             currency_code: None,
         };
 
-        let result = service.update_entry(user_id, entry_id, update_request).await;
+        let result = service
+            .update_entry(user_id, entry_id, update_request)
+            .await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), SpendingError::InvalidAmount));
     }
@@ -952,7 +1054,9 @@ mod tests {
             currency_code: None,
         };
 
-        let result = service.update_entry(user_id, entry_id, update_request).await;
+        let result = service
+            .update_entry(user_id, entry_id, update_request)
+            .await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), SpendingError::InvalidAmount));
     }
@@ -976,7 +1080,10 @@ mod tests {
             currency_code: Some("USD".to_string()),
         };
 
-        let created_entry = service.create_entry(user1_id, create_request).await.unwrap();
+        let created_entry = service
+            .create_entry(user1_id, create_request)
+            .await
+            .unwrap();
         let entry_id = created_entry.id;
 
         // Step 2: User 2 tries to update User 1's entry
@@ -989,8 +1096,10 @@ mod tests {
             currency_code: None,
         };
 
-        let result = service.update_entry(user2_id, entry_id, update_request).await;
-        
+        let result = service
+            .update_entry(user2_id, entry_id, update_request)
+            .await;
+
         // Step 3: Verify the update is rejected with Unauthorized error
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), SpendingError::Unauthorized));
@@ -1015,8 +1124,10 @@ mod tests {
             currency_code: None,
         };
 
-        let result = service.update_entry(user_id, non_existent_entry_id, update_request).await;
-        
+        let result = service
+            .update_entry(user_id, non_existent_entry_id, update_request)
+            .await;
+
         // Verify the update is rejected with EntryNotFound error
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), SpendingError::EntryNotFound));
@@ -1063,7 +1174,7 @@ mod tests {
         service.create_entry(user_id, request3).await.unwrap();
 
         // Get total
-        let result = service.get_total(user_id).await;
+        let result = service.get_total(user_id, SpendingFilters::default()).await;
         assert!(result.is_ok());
 
         let total = result.unwrap();
@@ -1103,7 +1214,7 @@ mod tests {
         service.create_entry(user_id, request2).await.unwrap();
 
         // Get total
-        let result = service.get_total(user_id).await;
+        let result = service.get_total(user_id, SpendingFilters::default()).await;
         assert!(result.is_ok());
 
         let total = result.unwrap();
@@ -1120,7 +1231,7 @@ mod tests {
         let user_id = Uuid::new_v4();
 
         // Get total for user with no entries
-        let result = service.get_total(user_id).await;
+        let result = service.get_total(user_id, SpendingFilters::default()).await;
         assert!(result.is_ok());
 
         let total = result.unwrap();
@@ -1161,11 +1272,17 @@ mod tests {
         service.create_entry(user2_id, request2).await.unwrap();
 
         // Get total for user1
-        let user1_total = service.get_total(user1_id).await.unwrap();
+        let user1_total = service
+            .get_total(user1_id, SpendingFilters::default())
+            .await
+            .unwrap();
         assert_eq!(user1_total.total, Decimal::from_str("50.00").unwrap());
 
         // Get total for user2
-        let user2_total = service.get_total(user2_id).await.unwrap();
+        let user2_total = service
+            .get_total(user2_id, SpendingFilters::default())
+            .await
+            .unwrap();
         assert_eq!(user2_total.total, Decimal::from_str("100.00").unwrap());
     }
 }

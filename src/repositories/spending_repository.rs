@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::models::filters::SpendingFilters;
 use crate::models::spending::{RecurrencePattern, SpendingEntry};
 
 /// Repository errors for database operations
@@ -31,14 +32,29 @@ pub trait SpendingRepository: Send + Sync {
     /// Find a spending entry by ID
     async fn find_by_id(&self, id: Uuid) -> Result<Option<SpendingEntry>, RepositoryError>;
 
-    /// Find all spending entries for a user, sorted by date descending
-    async fn find_by_user(&self, user_id: Uuid) -> Result<Vec<SpendingEntry>, RepositoryError>;
+    /// Find all spending entries for a user with optional filters, sorted by date descending
+    async fn find_by_user(
+        &self,
+        user_id: Uuid,
+        filters: SpendingFilters,
+    ) -> Result<Vec<SpendingEntry>, RepositoryError>;
 
     /// Delete a spending entry by ID
     async fn delete(&self, id: Uuid) -> Result<(), RepositoryError>;
 
-    /// Calculate total spending for a user
-    async fn calculate_total(&self, user_id: Uuid) -> Result<rust_decimal::Decimal, RepositoryError>;
+    /// Calculate total spending for a user with optional filters
+    async fn calculate_total(
+        &self,
+        user_id: Uuid,
+        filters: SpendingFilters,
+    ) -> Result<rust_decimal::Decimal, RepositoryError>;
+
+    /// Group spending by category with optional date range filter
+    async fn group_by_category(
+        &self,
+        user_id: Uuid,
+        date_range: Option<crate::models::filters::DateRange>,
+    ) -> Result<Vec<crate::models::filters::CategorySpending>, RepositoryError>;
 }
 
 /// PostgreSQL implementation of SpendingRepository
@@ -308,25 +324,133 @@ impl SpendingRepository for PostgresSpendingRepository {
         }))
     }
 
-    async fn find_by_user(&self, user_id: Uuid) -> Result<Vec<SpendingEntry>, RepositoryError> {
-        // Fetch all spending entries for the user, sorted by date descending
-        let entries_result = sqlx::query!(
+    async fn find_by_user(
+        &self,
+        user_id: Uuid,
+        filters: SpendingFilters,
+    ) -> Result<Vec<SpendingEntry>, RepositoryError> {
+        // Build dynamic SQL query based on provided filters
+        let mut query = String::from(
             r#"
             SELECT id, user_id, amount, date, is_recurring, 
                    recurrence_pattern, currency_code, created_at, updated_at
             FROM spending_entries
             WHERE user_id = $1
-            ORDER BY date DESC
             "#,
-            user_id
-        )
-        .fetch_all(&self.pool)
-        .await;
+        );
 
-        let entry_rows = match entries_result {
-            Ok(rows) => rows,
-            Err(e) => return Err(RepositoryError::DatabaseError(e.to_string())),
-        };
+        let mut param_count = 1;
+        let mut conditions = Vec::new();
+
+        // Add date filter (exact date match)
+        if filters.date.is_some() {
+            param_count += 1;
+            conditions.push(format!("date = ${}", param_count));
+        }
+
+        // Add date_range filter (inclusive)
+        if filters.date_range.is_some() {
+            param_count += 1;
+            let start_param = param_count;
+            param_count += 1;
+            let end_param = param_count;
+            conditions.push(format!("date BETWEEN ${} AND ${}", start_param, end_param));
+        }
+
+        // Add category_id filter
+        if filters.category_id.is_some() {
+            param_count += 1;
+            conditions.push(format!(
+                "id IN (SELECT spending_entry_id FROM spending_entry_categories WHERE category_id = ${})",
+                param_count
+            ));
+        }
+
+        // Add is_recurring filter
+        if filters.is_recurring.is_some() {
+            param_count += 1;
+            conditions.push(format!("is_recurring = ${}", param_count));
+        }
+
+        // Add currency_code filter
+        if filters.currency_code.is_some() {
+            param_count += 1;
+            conditions.push(format!("currency_code = ${}", param_count));
+        }
+
+        // Append conditions to query
+        if !conditions.is_empty() {
+            query.push_str(" AND ");
+            query.push_str(&conditions.join(" AND "));
+        }
+
+        // Add ORDER BY clause
+        query.push_str(" ORDER BY date DESC");
+
+        // Add pagination if provided
+        if filters.page_size.is_some() {
+            param_count += 1;
+            query.push_str(&format!(" LIMIT ${}", param_count));
+
+            if filters.page.is_some() {
+                param_count += 1;
+                query.push_str(&format!(" OFFSET ${}", param_count));
+            }
+        }
+
+        // Build the query with parameters
+        let mut sqlx_query = sqlx::query_as::<
+            _,
+            (
+                uuid::Uuid,
+                uuid::Uuid,
+                rust_decimal::Decimal,
+                chrono::NaiveDate,
+                bool,
+                Option<String>,
+                String,
+                chrono::DateTime<chrono::Utc>,
+                chrono::DateTime<chrono::Utc>,
+            ),
+        >(&query)
+        .bind(user_id);
+
+        // Bind parameters in order
+        if let Some(date) = filters.date {
+            sqlx_query = sqlx_query.bind(date);
+        }
+
+        if let Some(date_range) = &filters.date_range {
+            sqlx_query = sqlx_query.bind(date_range.start);
+            sqlx_query = sqlx_query.bind(date_range.end);
+        }
+
+        if let Some(category_id) = filters.category_id {
+            sqlx_query = sqlx_query.bind(category_id);
+        }
+
+        if let Some(is_recurring) = filters.is_recurring {
+            sqlx_query = sqlx_query.bind(is_recurring);
+        }
+
+        if let Some(currency_code) = &filters.currency_code {
+            sqlx_query = sqlx_query.bind(currency_code);
+        }
+
+        if let Some(page_size) = filters.page_size {
+            sqlx_query = sqlx_query.bind(page_size as i64);
+
+            if let Some(page) = filters.page {
+                let offset = (page.saturating_sub(1)) * page_size;
+                sqlx_query = sqlx_query.bind(offset as i64);
+            }
+        }
+
+        // Execute query
+        let entry_rows = sqlx_query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
 
         // For each entry, fetch associated category IDs
         let mut spending_entries = Vec::new();
@@ -337,7 +461,7 @@ impl SpendingRepository for PostgresSpendingRepository {
                 FROM spending_entry_categories
                 WHERE spending_entry_id = $1
                 "#,
-                entry_row.id
+                entry_row.0
             )
             .fetch_all(&self.pool)
             .await;
@@ -349,20 +473,20 @@ impl SpendingRepository for PostgresSpendingRepository {
 
             // Parse recurrence pattern back from string
             let recurrence_pattern = entry_row
-                .recurrence_pattern
+                .5
                 .as_deref()
                 .and_then(RecurrencePattern::from_db_string);
 
             spending_entries.push(SpendingEntry {
-                id: entry_row.id,
-                user_id: entry_row.user_id,
-                amount: entry_row.amount,
-                date: entry_row.date,
-                is_recurring: entry_row.is_recurring,
+                id: entry_row.0,
+                user_id: entry_row.1,
+                amount: entry_row.2,
+                date: entry_row.3,
+                is_recurring: entry_row.4,
                 recurrence_pattern,
-                currency_code: entry_row.currency_code,
-                created_at: entry_row.created_at,
-                updated_at: entry_row.updated_at,
+                currency_code: entry_row.6,
+                created_at: entry_row.7,
+                updated_at: entry_row.8,
                 category_ids,
             });
         }
@@ -396,22 +520,172 @@ impl SpendingRepository for PostgresSpendingRepository {
         }
     }
 
-    async fn calculate_total(&self, user_id: Uuid) -> Result<rust_decimal::Decimal, RepositoryError> {
-        // Calculate the sum of all spending entries for the user
-        let result = sqlx::query!(
+    async fn calculate_total(
+        &self,
+        user_id: Uuid,
+        filters: SpendingFilters,
+    ) -> Result<rust_decimal::Decimal, RepositoryError> {
+        // Build dynamic SQL query based on provided filters
+        let mut query = String::from(
             r#"
             SELECT COALESCE(SUM(amount), 0) as total
             FROM spending_entries
             WHERE user_id = $1
             "#,
-            user_id
-        )
-        .fetch_one(&self.pool)
-        .await;
+        );
 
-        match result {
-            Ok(row) => Ok(row.total.unwrap_or(rust_decimal::Decimal::ZERO)),
-            Err(e) => Err(RepositoryError::DatabaseError(e.to_string())),
+        let mut param_count = 1;
+        let mut conditions = Vec::new();
+
+        // Add date filter (exact date match)
+        if filters.date.is_some() {
+            param_count += 1;
+            conditions.push(format!("date = ${}", param_count));
         }
+
+        // Add date_range filter (inclusive)
+        if filters.date_range.is_some() {
+            param_count += 1;
+            let start_param = param_count;
+            param_count += 1;
+            let end_param = param_count;
+            conditions.push(format!("date BETWEEN ${} AND ${}", start_param, end_param));
+        }
+
+        // Add category_id filter
+        if filters.category_id.is_some() {
+            param_count += 1;
+            conditions.push(format!(
+                "id IN (SELECT spending_entry_id FROM spending_entry_categories WHERE category_id = ${})",
+                param_count
+            ));
+        }
+
+        // Add is_recurring filter
+        if filters.is_recurring.is_some() {
+            param_count += 1;
+            conditions.push(format!("is_recurring = ${}", param_count));
+        }
+
+        // Add currency_code filter
+        if filters.currency_code.is_some() {
+            param_count += 1;
+            conditions.push(format!("currency_code = ${}", param_count));
+        }
+
+        // Append conditions to query
+        if !conditions.is_empty() {
+            query.push_str(" AND ");
+            query.push_str(&conditions.join(" AND "));
+        }
+
+        // Build the query with parameters
+        let mut sqlx_query = sqlx::query_scalar::<_, rust_decimal::Decimal>(&query).bind(user_id);
+
+        // Bind parameters in order
+        if let Some(date) = filters.date {
+            sqlx_query = sqlx_query.bind(date);
+        }
+
+        if let Some(date_range) = &filters.date_range {
+            sqlx_query = sqlx_query.bind(date_range.start);
+            sqlx_query = sqlx_query.bind(date_range.end);
+        }
+
+        if let Some(category_id) = filters.category_id {
+            sqlx_query = sqlx_query.bind(category_id);
+        }
+
+        if let Some(is_recurring) = filters.is_recurring {
+            sqlx_query = sqlx_query.bind(is_recurring);
+        }
+
+        if let Some(currency_code) = &filters.currency_code {
+            sqlx_query = sqlx_query.bind(currency_code);
+        }
+
+        // Execute query
+        let total = sqlx_query
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        Ok(total)
+    }
+
+    async fn group_by_category(
+        &self,
+        user_id: Uuid,
+        date_range: Option<crate::models::filters::DateRange>,
+    ) -> Result<Vec<crate::models::filters::CategorySpending>, RepositoryError> {
+        // Build SQL query to group spending by category
+        let mut query = String::from(
+            r#"
+            SELECT 
+                c.id as category_id,
+                c.name as category_name,
+                SUM(se.amount) as total,
+                se.currency_code
+            FROM spending_entries se
+            JOIN spending_entry_categories sec ON se.id = sec.spending_entry_id
+            JOIN categories c ON sec.category_id = c.id
+            WHERE se.user_id = $1
+            "#,
+        );
+
+        let mut param_count = 1;
+
+        // Add date_range filter if provided
+        if date_range.is_some() {
+            param_count += 1;
+            let start_param = param_count;
+            param_count += 1;
+            let end_param = param_count;
+            query.push_str(&format!(
+                " AND se.date BETWEEN ${} AND ${}",
+                start_param, end_param
+            ));
+        }
+
+        // Group by category and currency, exclude zero spending, order by total descending
+        query.push_str(
+            r#"
+            GROUP BY c.id, c.name, se.currency_code
+            HAVING SUM(se.amount) > 0
+            ORDER BY total DESC
+            "#,
+        );
+
+        // Build the query with parameters
+        let mut sqlx_query =
+            sqlx::query_as::<_, (uuid::Uuid, String, rust_decimal::Decimal, String)>(&query)
+                .bind(user_id);
+
+        // Bind date range parameters if provided
+        if let Some(range) = &date_range {
+            sqlx_query = sqlx_query.bind(range.start);
+            sqlx_query = sqlx_query.bind(range.end);
+        }
+
+        // Execute query
+        let rows = sqlx_query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        // Map rows to CategorySpending structs
+        let category_spending = rows
+            .into_iter()
+            .map(|(category_id, category_name, total, currency)| {
+                crate::models::filters::CategorySpending {
+                    category_id,
+                    category_name,
+                    total,
+                    currency,
+                }
+            })
+            .collect();
+
+        Ok(category_spending)
     }
 }

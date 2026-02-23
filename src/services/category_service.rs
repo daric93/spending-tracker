@@ -172,9 +172,7 @@ mod tests {
     impl CategoryRepository for MockCategoryRepository {
         async fn create(&self, category: Category) -> Result<Category, RepositoryError> {
             if self.should_fail {
-                return Err(RepositoryError::DatabaseError(
-                    "Database error".to_string(),
-                ));
+                return Err(RepositoryError::DatabaseError("Database error".to_string()));
             }
 
             let mut categories = self.categories.lock().unwrap();
@@ -201,9 +199,7 @@ mod tests {
             name: &str,
         ) -> Result<Option<Category>, RepositoryError> {
             if self.should_fail {
-                return Err(RepositoryError::DatabaseError(
-                    "Database error".to_string(),
-                ));
+                return Err(RepositoryError::DatabaseError("Database error".to_string()));
             }
 
             let categories = self.categories.lock().unwrap();
@@ -212,9 +208,7 @@ mod tests {
 
         async fn find_by_user(&self, user_id: Uuid) -> Result<Vec<Category>, RepositoryError> {
             if self.should_fail {
-                return Err(RepositoryError::DatabaseError(
-                    "Database error".to_string(),
-                ));
+                return Err(RepositoryError::DatabaseError("Database error".to_string()));
             }
 
             let categories = self.categories.lock().unwrap();
@@ -257,9 +251,11 @@ mod tests {
         assert!(categories.iter().any(|c| c.name == "restaurant"));
 
         // Verify custom category is included
-        assert!(categories
-            .iter()
-            .any(|c| c.name == "my_custom_category" && c.user_id == Some(user_id)));
+        assert!(
+            categories
+                .iter()
+                .any(|c| c.name == "my_custom_category" && c.user_id == Some(user_id))
+        );
     }
 
     #[tokio::test]
@@ -310,9 +306,7 @@ mod tests {
         repo.create(custom_category.clone()).await.unwrap();
 
         // Now try to get or create it again
-        let result = service
-            .get_or_create_by_name(user_id, "my_category")
-            .await;
+        let result = service.get_or_create_by_name(user_id, "my_category").await;
 
         assert!(result.is_ok());
         let category = result.unwrap();
@@ -343,9 +337,7 @@ mod tests {
         let service = CategoryServiceImpl::new(repo);
 
         let user_id = Uuid::new_v4();
-        let result = service
-            .get_or_create_by_name(user_id, "new_category")
-            .await;
+        let result = service.get_or_create_by_name(user_id, "new_category").await;
 
         assert!(result.is_err());
         assert!(matches!(
@@ -363,16 +355,12 @@ mod tests {
         let user2_id = Uuid::new_v4();
 
         // User 1 creates a custom category
-        let result1 = service
-            .get_or_create_by_name(user1_id, "my_category")
-            .await;
+        let result1 = service.get_or_create_by_name(user1_id, "my_category").await;
         assert!(result1.is_ok());
         let category1 = result1.unwrap();
 
         // User 2 creates a custom category with the same name
-        let result2 = service
-            .get_or_create_by_name(user2_id, "my_category")
-            .await;
+        let result2 = service.get_or_create_by_name(user2_id, "my_category").await;
         assert!(result2.is_ok());
         let category2 = result2.unwrap();
 
