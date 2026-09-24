@@ -1,7 +1,5 @@
 # Spending Tracker API
 
-> **Note:** This is a practice project built to learn Rust and demonstrate backend development skills for my portfolio.
-
 A RESTful API backend service for tracking personal spending, built with Rust and Axum. This project showcases modern Rust web development practices, including async programming, type-safe database queries, JWT authentication, and comprehensive testing.
 
 ## 🎯 Project Overview
